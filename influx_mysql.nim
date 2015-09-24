@@ -1,17 +1,27 @@
+{.boundChecks: on.}
+
 import macros
 import unsigned
 import strtabs
 import strutils
-import asynchttpserver
 import asyncdispatch
+import asyncnet
+import asynchttpserver
+from sockets import BufferSize
 import lists
+import hashes as hashes
 import tables
 import strtabs
 import marshal
 import json
 import cgi
+import times
+
 import qt5_qtsql
 
+import reflists
+import microasynchttpserver
+import qsqldatabase
 import qvariant
 import qdatetime
 import qsqlrecord
@@ -23,8 +33,8 @@ type
     URLParameterNotFoundError = object of ValueError
 
     JSONEntryValues = tuple
-        order: OrderedTableRef[string, bool] not nil
-        entries: ref DoublyLinkedList[TableRef[string, JSONField]] not nil
+        order: OrderedTableRef[ref string, bool] not nil
+        entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
     SeriesAndData = tuple
         series: string
@@ -78,24 +88,58 @@ type
         Microsecond
         Nanosecond
 
+template hash(x: ref string): THash =
+    hashes.hash(cast[pointer](x))
+
 macro useDB(body: stmt): stmt {.immediate.} =
-    var safeBody = newNimNode(nnkTryStmt)
-    safeBody.add(body)
+    # Create the try block that closes the database.
+    var safeBodyClose = newNimNode(nnkTryStmt)
+    safeBodyClose.add(body)
 
-    var safeBodyFinally = newNimNode(nnkFinally)
-    safeBodyFinally.add(parseStmt("database.close"))
+    ## Create the finally clause
+    var safeBodyCloseFinally = newNimNode(nnkFinally)
+    safeBodyCloseFinally.add(parseStmt("database.close"))
     
-    safeBody.add(safeBodyFinally)
+    ## Add the finally clause to the try block.
+    safeBodyClose.add(safeBodyCloseFinally)
 
-    result = newBlockStmt(newStmtList(parseStmt("""
+    # Create the try block that removes the database.
+    var safeBodyRemove = newNimNode(nnkTryStmt)
+    safeBodyRemove.add(
+        newBlockStmt(
+            newStmtList(
+                parseStmt("""
 
-var database = newQSqlDatabase("QMYSQL", "influx_mysql" & $cast[uint64](getGlobalDispatcher()))
+var database = newQSqlDatabase("QMYSQL", qSqlDatabaseName)
 database.setHostName("127.0.0.1")
 database.setDatabaseName("influx")
 database.setPort(3306)
 database.open("test", "test")
 
-    """), safeBody))
+                """), 
+                safeBodyClose
+            )
+        )
+    )
+
+    ## Create the finally clause.
+    var safeBodyRemoveFinally = newNimNode(nnkFinally)
+    safeBodyRemoveFinally.add(parseStmt("qSqlDatabaseRemoveDatabase(qSqlDatabaseName)"))
+
+    ## Add the finally clause to the try block.
+    safeBodyRemove.add(safeBodyRemoveFinally)
+
+    # Put it all together.
+    result = newBlockStmt(
+                newStmtList(
+                    parseStmt("""
+
+var qSqlDatabaseStackId: uint8
+var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
+                    """), 
+                    safeBodyRemove
+                )
+            )
 
 proc strdup(s: var string): string =
     result = newString(s.len)
@@ -214,10 +258,11 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
     else:
         result.kind = JSONFieldKind.Null
 
-proc addNulls(entries: ref DoublyLinkedList[TableRef[string, JSONField]], order: OrderedTableRef[string, bool] not nil,
-                lastTime: uint64, newTime: uint64, period: uint64, epoch: EpochFormat) =
+proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
+                lastTime: uint64, newTime: uint64, period: uint64, epoch: EpochFormat, internedStrings: var Table[string, ref string]) =
 
     var lastTime = lastTime
+    let timeInterned = internedStrings["time"]
 
     if ((newTime - lastTime) div period) > uint64(1):
         while true:
@@ -226,25 +271,22 @@ proc addNulls(entries: ref DoublyLinkedList[TableRef[string, JSONField]], order:
             if lastTime >= newTime:
                 break
 
-            var entryValues = newTable[string, JSONField]()
+            var entryValues = newTable[ref string, JSONField]()
             for fieldName in order.keys:
-                if fieldName != "time":
+                if fieldName != timeInterned:
                     entryValues[fieldName] = JSONField(kind: JSONFieldKind.Null)
                 else:
-                    entryValues["time"] = lastTime.toJSONField(epoch)
+                    entryValues[timeInterned] = lastTime.toJSONField(epoch)
 
-            entries[].append(entryValues)
+            entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData])  =
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string])  =
     useDB:
         sql.useQuery(database)
 
-        var entries: ref DoublyLinkedList[TableRef[string, JSONField]]
-        new(entries)
-        entries[] = initDoublyLinkedList[TableRef[string, JSONField]]()
-
-        var seriesAndData = (series: series, data: (order: cast[OrderedTableRef[string, bool] not nil](newOrderedTable[string, bool]()), 
-                                entries: cast[ref DoublyLinkedList[TableRef[string, JSONField]] not nil](entries)))
+        var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()
+        var seriesAndData: SeriesAndData = (series: series, data: (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
+                                entries: entries))
         result.append(seriesAndData)
 
         var order = seriesAndData.data.order
@@ -256,7 +298,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: Ep
             var record = query.record
             let count = record.count - 1
 
-            var entryValues = newTable[string, JSONField]()
+            var entryValues = newTable[ref string, JSONField]()
 
             # For strict InfluxDB compatibility:
             #
@@ -266,7 +308,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: Ep
             var newTime = uint64(record.value("time").toMSecsSinceEpoch)
 
             if (period > uint64(0)) and not first:
-                entries.addNulls(order, lastTime, newTime, period, epoch)
+                entries.addNulls(order, lastTime, newTime, period, epoch, internedStrings)
             else:
                 first = false
 
@@ -288,11 +330,18 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: Ep
                         fieldName = "mean"
 
                 var value = record.toJSONField(i, epoch)
+                var fieldNameInterned = internedStrings[fieldName]
 
-                discard order.hasKeyOrPut(fieldName, true)
-                entryValues[fieldName] = value
+                if fieldnameInterned == nil:
+                    new(fieldNameInterned)
+                    fieldNameInterned[] = fieldName
 
-            entries[].append(entryValues)
+                    internedStrings[fieldName] = fieldNameInterned
+
+                discard order.hasKeyOrPut(fieldNameInterned, true)
+                entryValues[fieldNameInterned] = value
+
+            entries.append(entryValues)
 
 converter toJsonNode(field: JSONField): JsonNode =
     case field.kind:
@@ -313,13 +362,13 @@ proc toJsonNode(kv: SeriesAndData): JsonNode =
     var columns = newJArray()
 
     for column in kv.data.order.keys:
-        columns.add(newJString(column))
+        columns.add(newJString(column[]))
 
     seriesObject.add("columns", columns)
 
     var valuesArray = newJArray()
 
-    for entry in kv.data.entries[].items:
+    for entry in kv.data.entries.items:
         var entryArray = newJArray()
 
         for column in kv.data.order.keys:
@@ -362,7 +411,14 @@ proc getQuery(request: Request) {.async.} =
     if urlQuery == nil:
         raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
 
+    var internedStrings = initTable[string, ref string]()
     var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
+
+    var timeInterned: ref string
+    new(timeInterned)
+    timeInterned[] = "time"
+
+    internedStrings["time"] = timeInterned
 
     for line in urlQuery.splitLines:
         var series: string
@@ -376,21 +432,78 @@ proc getQuery(request: Request) {.async.} =
             stdout.write(" --> ")
             stdout.writeln(sql)
 
-        sql.runDBQueryAndUnpack(series, period, epoch, entries)
+        sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings)
 
     result = request.respond(Http200, entries.toQueryResponse, newStringTable("Content-Type", "application/json", modeCaseSensitive))
 
+import posix
+
 proc postWrite(request: Request) {.async.} =
-    var entries = initTable[string, SQLEntryValues]()
+    var internedStrings = initTable[string, ref string]()
+    var entries = initTable[ref string, SQLEntryValues]()
     var sql = newStringOfCap(2097152)
 
-    for line in request.body.splitLines:
-        if line.len > 0:
-            line.lineProtocolToSQLEntryValues(entries)
+    let contentLength = request.headers["Content-Length"].parseInt
+    if (contentLength == 0):
+        result = request.respond(Http400, "Content-Length required, but not provided!")
+        return
 
-            when defined(logrequests):
-                stdout.write("/write: ")
-                stdout.writeln(line)
+    var timeInterned: ref string
+    new(timeInterned)
+    timeInterned[] = "time"
+
+    internedStrings["time"] = timeInterned
+
+    var lines = request.client.recvWholeBuffer
+    var read = 0
+    var noReadsStart: Time = Time(0)
+
+    while read < contentLength:
+        var chunkLen = contentLength - read
+        if chunkLen > BufferSize:
+            chunkLen = BufferSize
+
+        let readNow = request.client.rawRecv(chunkLen)
+        if readNow.len < 1:
+            if errno != EAGAIN:
+                raise newException(IOError, "Client socket disconnected!")
+            else:
+                if noReadsStart == Time(0):
+                    noReadsStart = getTime()
+                    continue
+                else:
+                    if (getTime() - noReadsStart) >= 2:
+                        # Timeout, probably gave us the wrong Content-Length.
+                        break
+        else:
+            noReadsStart = Time(0)
+
+        read += readNow.len
+
+        lines.add(readNow)
+
+        var lineStart = 0
+        while lineStart < lines.len:
+            let lineEnd = lines.find("\n", lineStart) - "\n".len
+
+            if lineEnd < 0 or lineEnd >= lines.len:
+                break
+
+            let line = lines[lineStart..lineEnd]
+
+            if line.len > 0:
+                when defined(logrequests):
+                    stdout.write("/write: ")
+                    stdout.writeln(line)
+
+                line.lineProtocolToSQLEntryValues(entries, internedStrings)
+
+            lineStart = lineEnd + "\n".len + 1
+
+        if lineStart < lines.len:
+            lines = lines[lineStart..lines.len-1]
+        else:
+            lines = ""
 
     for pair in entries.pairs:
         pair.sqlEntryValuesToSQL(sql)
@@ -430,7 +543,7 @@ proc router(request: Request) {.async.} =
 
 block:
     try:
-        waitFor newAsyncHttpServer().serve(Port(8086), router)
+        waitFor newMicroAsyncHttpServer().serve(Port(8086), router)
     except Exception:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())

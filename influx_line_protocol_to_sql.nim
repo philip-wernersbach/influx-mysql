@@ -1,15 +1,20 @@
 import unsigned
 import strutils
-import lists
+import hashes as hashes
 import tables
 import strtabs
+
+import reflists
 
 #const QUERY_LANG_LEN = "INSERT INTO  (  ) VALUES (  );".len
 
 type
     SQLEntryValues* = tuple
-        order: OrderedTableRef[string, bool] not nil
-        entries: ref DoublyLinkedList[StringTableRef] not nil
+        order: OrderedTableRef[ref string, bool] not nil
+        entries: SinglyLinkedRefList[Table[ref string, string]] not nil
+
+template hash(x: ref string): THash =
+    hashes.hash(cast[pointer](x))
 
 proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
     let entryLen = entry.len
@@ -75,7 +80,7 @@ proc valueType(value: string): InfluxValueType =
         else:
             result = InfluxValueType.FLOAT
 
-proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[string, SQLEntryValues]) =
+proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string]) =
     let keyAndTags = entry.getToken(' ', 0)
 
     let fieldsStart = keyAndTags.len + 1
@@ -85,57 +90,76 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[string, SQLE
 
     let key = entry.getToken({',', ' '}, 0)
 
+    let timeInterned = internedStrings["time"]
+
     var timestampSQL = newStringOfCap(timestamp.len + 14 + 29)
     timestampSQL.add("FROM_UNIXTIME(")
     timestampSQL.add(timestamp)
     timestampSQL.add(" * 0.000000001)")
 
-    if not result.hasKey(key):
-        var entriesRef: ref DoublyLinkedList[StringTableRef]
-        new(entriesRef)
-        entriesRef[] = initDoublyLinkedList[StringTableRef]()
+    var keyInterned = internedStrings[key]
+    if keyInterned == nil:
+        new(keyInterned)
+        keyInterned[] = key
 
-        result[key] = (order: cast[OrderedTableRef[string, bool] not nil](newOrderedTable[string, bool]()), 
-                        entries: cast[ref DoublyLinkedList[StringTableRef] not nil](entriesRef))
+        internedStrings[key] = keyInterned
 
-    var entryValues = newStringTable(modeCaseSensitive)
-    var order = result[key].order
-    var entries = result[key].entries
+    if not result.hasKey(keyInterned):
+        result[keyInterned] = (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
+                        entries: newSinglyLinkedRefList[Table[ref string, string]]())
 
-    discard order.hasKeyOrPut("time", true)
-    entryValues["time"] = timestampSQL
+    var entryValues = newTable[ref string, string]()
+    var order = result[keyInterned].order
+    var entries = result[keyInterned].entries
+
+    discard order.hasKeyOrPut(timeInterned, true)
+    entryValues[timeInterned] = timestampSQL
 
     for tagAndValue in keyAndTags.tokens(',', key.len + 1):
         let tag = tagAndValue.getToken('=', 0)
         let value = tagAndValue[tag.len+1..tagAndValue.len-1]
 
-        discard order.hasKeyOrPut(tag, true)
-        entryValues[tag] = value.escape("'", "'")
+        var tagInterned = internedStrings[tag]
+        if tagInterned == nil:
+            new(tagInterned)
+            tagInterned[] = tag
+
+            internedStrings[tag] = tagInterned
+
+        discard order.hasKeyOrPut(tagInterned, true)
+        entryValues[tagInterned] = value.escape("'", "'")
 
     for nameAndValue in fields.tokens(','):
         let name = nameAndValue.getToken('=', 0)
         let value = nameAndValue[name.len+1..nameAndValue.len-1]
 
-        discard order.hasKeyOrPut(name, true)
+        var nameInterned = internedStrings[name]
+        if nameInterned == nil:
+            new(nameInterned)
+            nameInterned[] = name
+
+            internedStrings[name] = nameInterned
+
+        discard order.hasKeyOrPut(nameInterned, true)
 
         case value.valueType:
         of InfluxValueType.INTEGER:
-            entryValues[name] = value[0..value.len-1]
+            entryValues[nameInterned] = value[0..value.len-1]
         of InfluxValueType.STRING:
-            entryValues[name] = value.unescape.escape("'", "'")
+            entryValues[nameInterned] = value.unescape.escape("'", "'")
         of InfluxValueType.FLOAT:
-            entryValues[name] = value
+            entryValues[nameInterned] = value
         of InfluxValueType.BOOLEAN_TRUE:
-            entryValues[name] = "TRUE"
+            entryValues[nameInterned] = "TRUE"
         of InfluxValueType.BOOLEAN_FALSE:
-            entryValues[name] = "FALSE"
+            entryValues[nameInterned] = "FALSE"
 
-    entries[].append(entryValues)
+    entries.append(entryValues)
 
-proc sqlEntryValuesToSQL*(kv: tuple[key: string, value: SQLEntryValues], result: var string) =
+proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string) =
     # Add header
     result.add("INSERT INTO ")
-    result.add(kv.key)
+    result.add(kv.key[])
 
     result.add(" ( ")
 
@@ -146,13 +170,13 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: string, value: SQLEntryValues], result:
         else:
             first = false
 
-        result.add(columnName)
+        result.add(columnName[])
 
     # Add column values
     result.add(" ) VALUES")
     
     first = true
-    for entry in kv.value.entries[].items:
+    for entry in kv.value.entries.items:
         if not first:
             result.add(",")
         else:
@@ -167,7 +191,10 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: string, value: SQLEntryValues], result:
             else:
                 first2 = false
 
-            result.add(entry[columnName])
+            if entry.hasKey(columnName):
+                result.add(entry[columnName])
+            else:
+                result.add("NULL")
 
         result.add(" )")
 
