@@ -113,11 +113,12 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     var entries = result[keyInterned].entries
 
     discard order.hasKeyOrPut(timeInterned, true)
+    shallow(timestampSQL)
     entryValues[timeInterned] = timestampSQL
 
     for tagAndValue in keyAndTags.tokens(',', key.len + 1):
         let tag = tagAndValue.getToken('=', 0)
-        let value = tagAndValue[tag.len+1..tagAndValue.len-1]
+        var value = tagAndValue[tag.len+1..tagAndValue.len-1]
 
         var tagInterned = internedStrings[tag]
         if tagInterned == nil:
@@ -127,11 +128,14 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
             internedStrings[tag] = tagInterned
 
         discard order.hasKeyOrPut(tagInterned, true)
-        entryValues[tagInterned] = value.escape("'", "'")
+
+        value = value.escape("'", "'")
+        shallow(value)
+        entryValues[tagInterned] = value
 
     for nameAndValue in fields.tokens(','):
         let name = nameAndValue.getToken('=', 0)
-        let value = nameAndValue[name.len+1..nameAndValue.len-1]
+        var value = nameAndValue[name.len+1..nameAndValue.len-1]
 
         var nameInterned = internedStrings[name]
         if nameInterned == nil:
@@ -144,15 +148,29 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
         case value.valueType:
         of InfluxValueType.INTEGER:
-            entryValues[nameInterned] = value[0..value.len-1]
+            value = value[0..value.len-1]
+            shallow(value)
+
+            entryValues[nameInterned] = value
         of InfluxValueType.STRING:
-            entryValues[nameInterned] = value.unescape.escape("'", "'")
+            value = value.unescape.escape("'", "'")
+            shallow(value)
+
+            entryValues[nameInterned] = value
         of InfluxValueType.FLOAT:
+            shallow(value)
+
             entryValues[nameInterned] = value
         of InfluxValueType.BOOLEAN_TRUE:
-            entryValues[nameInterned] = "TRUE"
+            value = "TRUE"
+            shallow(value)
+
+            entryValues[nameInterned] = value
         of InfluxValueType.BOOLEAN_FALSE:
-            entryValues[nameInterned] = "FALSE"
+            value = "FALSE"
+            shallow(value)
+            
+            entryValues[nameInterned] = value
 
     entries.append(entryValues)
 
