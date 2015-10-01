@@ -443,6 +443,8 @@ proc postWrite(request: Request) {.async.} =
     var entries = initTable[ref string, SQLEntryValues]()
     var sql = newStringOfCap(2097152)
 
+    var readNow = newString(BufferSize)
+
     let contentLength = request.headers["Content-Length"].parseInt
     if (contentLength == 0):
         result = request.respond(Http400, "Content-Length required, but not provided!")
@@ -455,6 +457,7 @@ proc postWrite(request: Request) {.async.} =
     internedStrings["time"] = timeInterned
 
     var lines = request.client.recvWholeBuffer
+    var line = ""
     var read = 0
     var noReadsStart: Time = Time(0)
 
@@ -463,7 +466,7 @@ proc postWrite(request: Request) {.async.} =
         if chunkLen > BufferSize:
             chunkLen = BufferSize
 
-        let readNow = request.client.rawRecv(chunkLen)
+        request.client.rawRecv(readNow, chunkLen)
         if readNow.len < 1:
             if errno != EAGAIN:
                 raise newException(IOError, "Client socket disconnected!")
@@ -489,7 +492,9 @@ proc postWrite(request: Request) {.async.} =
             if lineEnd < 0 or lineEnd >= lines.len:
                 break
 
-            let line = lines[lineStart..lineEnd]
+            let lineNewSize = lineEnd - lineStart + 1
+            line.setLen(lineNewSize)
+            copyMem(addr(line[0]), addr(lines[lineStart]), lineNewSize)
 
             if line.len > 0:
                 when defined(logrequests):
@@ -501,9 +506,12 @@ proc postWrite(request: Request) {.async.} =
             lineStart = lineEnd + "\n".len + 1
 
         if lineStart < lines.len:
-            lines = lines[lineStart..lines.len-1]
+            let linesNewSize = lines.len - lineStart
+            
+            moveMem(addr(lines[0]), addr(lines[lineStart]), linesNewSize)
+            lines.setLen(linesNewSize)
         else:
-            lines = ""
+            lines.setLen(0)
 
     for pair in entries.pairs:
         pair.sqlEntryValuesToSQL(sql)
@@ -514,6 +522,15 @@ proc postWrite(request: Request) {.async.} =
 
         sql.runDBQueryWithTransaction
         sql.setLen(0)
+
+    # Explicitly hint the garbage collector that it can collect these.
+    internedStrings = initTable[string, ref string]()
+    entries = initTable[ref string, SQLEntryValues]()
+    sql = nil
+    readNow = nil
+    timeInterned = nil
+    lines = nil
+    line = nil
 
     result = request.respond(Http204, "", newStringTable(modeCaseSensitive))
 
