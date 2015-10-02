@@ -392,6 +392,9 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     result = $json
 
 proc getQuery(request: Request) {.async.} =
+    GC_disable()
+    defer: GC_enable()
+
     let params = getParams(request)
 
     let urlQuery = params["q"]
@@ -447,9 +450,18 @@ proc getQuery(request: Request) {.async.} =
     for entry in entries.items:
         entry.data.entries.removeAll
 
+    internedStrings = initTable[string, ref string]()
+    entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
+
+    GC_enable()
+    timeInterned = nil
+
 import posix
 
 proc postWrite(request: Request) {.async.} =
+    GC_disable()
+    defer: GC_enable()
+
     var internedStrings = initTable[string, ref string]()
     var entries = initTable[ref string, SQLEntryValues]()
     var sql = newStringOfCap(2097152)
@@ -546,6 +558,8 @@ proc postWrite(request: Request) {.async.} =
     readNow = nil
     timeInterned = nil
     lines = nil
+
+    GC_enable()
     line = nil
 
 proc router(request: Request) {.async.} =
