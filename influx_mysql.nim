@@ -432,7 +432,14 @@ proc getQuery(request: Request) {.async.} =
             stdout.write(" --> ")
             stdout.writeln(sql)
 
-        sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings)
+        try:
+            sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings)
+        except DBQueryException:
+            stdout.write("/query: ")
+            stdout.write(line)
+            stdout.write(" --> ")
+            stdout.writeln(sql)
+            raise getCurrentException()
 
     result = request.respond(Http200, entries.toQueryResponse, newStringTable("Content-Type", "application/json", modeCaseSensitive))
 
