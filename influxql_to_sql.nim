@@ -79,9 +79,10 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): s
             if partsLen >= 3:
                 for i in countUp(1, partsLen - 1):
                     if parts[i] == "FROM":
-                        parts[0] = "SELECT time,"
-                        
                         let seriesPos = i + 1
+
+                        if parts[i - 1] != "*":
+                            parts[0] = "SELECT time,"
 
                         if (partsLen > seriesPos):
                             when defined(influxql_unquote_everything):

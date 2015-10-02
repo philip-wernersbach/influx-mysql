@@ -443,6 +443,10 @@ proc getQuery(request: Request) {.async.} =
 
     result = request.respond(Http200, entries.toQueryResponse, newStringTable("Content-Type", "application/json", modeCaseSensitive))
 
+    # Explicitly hint the garbage collector that it can collect these.
+    for entry in entries.items:
+        entry.data.entries.removeAll
+
 import posix
 
 proc postWrite(request: Request) {.async.} =
@@ -530,7 +534,12 @@ proc postWrite(request: Request) {.async.} =
         sql.runDBQueryWithTransaction
         sql.setLen(0)
 
+    result = request.respond(Http204, "", newStringTable(modeCaseSensitive))
+
     # Explicitly hint the garbage collector that it can collect these.
+    for entry in entries.values:
+        entry.entries.removeAll
+
     internedStrings = initTable[string, ref string]()
     entries = initTable[ref string, SQLEntryValues]()
     sql = nil
@@ -538,8 +547,6 @@ proc postWrite(request: Request) {.async.} =
     timeInterned = nil
     lines = nil
     line = nil
-
-    result = request.respond(Http204, "", newStringTable(modeCaseSensitive))
 
 proc router(request: Request) {.async.} =
     when defined(logrequests):

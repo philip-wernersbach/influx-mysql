@@ -1,4 +1,4 @@
-when defined(enableReflists):
+when not defined(disablereflists) and (compileOption("gc", "v2") or compileOption("gc", "refc")):
     type 
         SinglyLinkedRefListNodeObj[T] = tuple
             next: ptr SinglyLinkedRefListNodeObj[T]
@@ -13,7 +13,7 @@ when defined(enableReflists):
         SinglyLinkedRefList*[T] = ref SinglyLinkedRefListObj[T]
 
     proc newSinglyLinkedRefListNode[T](value: ref T): SinglyLinkedRefListNode[T] not nil =
-        let p = alloc0(sizeof(SinglyLinkedRefListNode[T]))
+        let p = create(SinglyLinkedRefListNodeObj[T])
 
         if p != nil:
             result = cast[SinglyLinkedRefListNode[T] not nil](p)
@@ -23,16 +23,22 @@ when defined(enableReflists):
         GC_ref(value)
         result[] = (next: nil, value: cast[pointer](value))
 
-    proc finalizeSinglyLinkedRefList[T](list: SinglyLinkedRefList[T] not nil) =
+    proc finalizeSinglyLinkedRefList*[T](list: SinglyLinkedRefList[T] not nil) =
         var current = list.head
+        list.head = nil
+        list.tail = nil
 
         while current != nil:
             let value = cast[ref T](current.value)
             let next = current.next
+            current.next = nil
 
-            dealloc(current)
+            free(current)
             GC_unref(value)
             current = next
+
+    template removeAll*[T](list: SinglyLinkedRefList[T] not nil) =
+        list.finalizeSinglyLinkedRefList
 
     proc newSinglyLinkedRefList*[T](): SinglyLinkedRefList[T] not nil =
         new(result, finalizeSinglyLinkedRefList)
@@ -66,6 +72,9 @@ else:
 
     proc newSinglyLinkedRefListNode[T](value: ref T): SinglyLinkedRefListNode[T] =
         result = newSinglyLinkedNode[ref T](value)
+
+    template removeAll*[T](list: SinglyLinkedRefList[T] not nil) = 
+        discard
 
     iterator items*[T](list: SinglyLinkedRefList[T] not nil): ref T =
         for item in list[].items:
