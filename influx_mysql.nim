@@ -391,6 +391,10 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     json.add("results", results)
     result = $json
 
+proc getOrHeadPing(request: Request) {.async.} =
+    let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
+    result = request.respond(Http204, "", newStringTable("X-Influxdb-Version", "0.9.3-compatible-influxmysql", "Date", date, modeCaseSensitive))
+
 proc getQuery(request: Request) {.async.} =
     GC_disable()
     defer: GC_enable()
@@ -573,6 +577,8 @@ proc router(request: Request) {.async.} =
             asyncCheck request.getQuery
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
             asyncCheck request.postWrite
+        elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
+            asyncCheck request.getOrHeadPing
         else:
             let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
             stdout.writeln(responseMessage)
