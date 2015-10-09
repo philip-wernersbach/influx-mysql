@@ -23,6 +23,7 @@ import reflists
 import microasynchttpserver
 import qsqldatabase
 import qvariant
+import qtimezone
 import qdatetime
 import qsqlrecord
 import influxql_to_sql
@@ -165,6 +166,9 @@ template useQuery(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
 
 proc runDBQueryWithTransaction(sql: cstring) =
     useDB:
+        block:
+            "SET time_zone='UTC'".useQuery(database)
+
         database.beginTransaction
         sql.useQuery(database)
         database.commitTransaction
@@ -190,7 +194,10 @@ proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
 proc toJSONField(msSinceEpoch: uint64, epoch: EpochFormat): JSONField =
     case epoch:
     of EpochFormat.RFC3339:
-        result = newQDateTimeObj(qint64(msSinceEpoch)).toRFC3339JSONField
+        var dateTime = newQDateTimeObj(qint64(msSinceEpoch))
+        dateTime.setTimeZone(qTimeZoneUtc())
+
+        result = dateTime.toRFC3339JSONField
     of EpochFormat.Hour:
         result.kind = JSONFieldKind.UInteger
         result.uintVal = msSinceEpoch div 3600000
@@ -216,12 +223,14 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
 
         case QVariantType(valueVariant.userType):
         of QVariantType.Date, QVariantType.Time, QVariantType.DateTime:
+            var dateTime = valueVariant.toQDateTimeObj
+            dateTime.setTimeZone(qTimeZoneUtc())
 
             case epoch:
             of EpochFormat.RFC3339:
-                result = valueVariant.toQDateTimeObj.toRFC3339JSONField
+                result = dateTime.toRFC3339JSONField
             else:
-                result = uint64(valueVariant.toQDateTimeObj.toMSecsSinceEpoch).toJSONField(epoch)
+                result = uint64(dateTime.toMSecsSinceEpoch).toJSONField(epoch)
 
         of QVariantType.Bool:
 
@@ -282,6 +291,9 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string])  =
     useDB:
+        block:
+            "SET time_zone='UTC'".useQuery(database)
+
         sql.useQuery(database)
 
         var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()

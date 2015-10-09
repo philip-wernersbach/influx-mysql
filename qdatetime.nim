@@ -1,5 +1,7 @@
 import qt5_qtsql
 
+import qtimezone
+
 const QDATETIME_H = "<QtCore/QDateTime>"
 
 type
@@ -15,3 +17,5 @@ proc newQDateTimeObj*(msecs: qint64): QDateTimeObj =
 
 proc toQStringObj*(dateTime: QDateTimeObj, format: cstring): QStringObj {.header: QDATETIME_H, importcpp: "toString".}
 proc toMSecsSinceEpoch*(dateTime: QDateTimeObj): qint64 {.header: QDATETIME_H, importcpp: "toMSecsSinceEpoch".}
+
+proc setTimeZone*(dateTime: QDateTimeObj, toZone: QTimeZoneObj) {.header: QDATETIME_H, importcpp: "setTimeZone".}
