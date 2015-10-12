@@ -113,7 +113,7 @@ macro useDB(dbName: string, dbUsername: string, dbPassword: string, body: stmt):
     safeBodyRemove.add(
         newBlockStmt(
             newStmtList(
-                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("newQSqlDatabase"), newIdentNode(!"qSqlDatabaseName"))),
+                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("QMYSQL"), newIdentNode(!"qSqlDatabaseName"))),
                 newCall(!"setHostName", newIdentNode(!"database"), newIdentNode(!"dbHostName")),
                 newCall(!"setDatabaseName", newIdentNode(!"database"), dbName),
                 newCall(!"setPort", newIdentNode(!"database"), newIdentNode(!"dbPort")),
