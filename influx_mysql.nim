@@ -445,7 +445,7 @@ proc getQuery(request: Request) {.async.} =
         dbUsername = params["u"]
 
     if params.hasKey("p"):
-        dbUsername = params["p"]
+        dbPassword = params["p"]
 
     var timeInterned: ref string
     new(timeInterned)
@@ -505,7 +505,7 @@ proc postWrite(request: Request) {.async.} =
         dbUsername = params["u"]
 
     if params.hasKey("p"):
-        dbUsername = params["p"]
+        dbPassword = params["p"]
 
     var internedStrings = initTable[string, ref string]()
     var entries = initTable[ref string, SQLEntryValues]()
