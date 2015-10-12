@@ -653,3 +653,5 @@ block:
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
         stderr.writeln(getCurrentExceptionMsg())
+
+        quit(QuitFailure)
