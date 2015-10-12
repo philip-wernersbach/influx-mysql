@@ -16,6 +16,7 @@ import marshal
 import json
 import cgi
 import times
+import os
 
 import qt5_qtsql
 
@@ -89,10 +90,13 @@ type
         Microsecond
         Nanosecond
 
+var dbHostname: cstring = nil
+var dbPort: cint = 0
+
 template hash(x: ref string): THash =
     hashes.hash(cast[pointer](x))
 
-macro useDB(body: stmt): stmt {.immediate.} =
+macro useDB(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
     # Create the try block that closes the database.
     var safeBodyClose = newNimNode(nnkTryStmt)
     safeBodyClose.add(body)
@@ -109,15 +113,11 @@ macro useDB(body: stmt): stmt {.immediate.} =
     safeBodyRemove.add(
         newBlockStmt(
             newStmtList(
-                parseStmt("""
-
-var database = newQSqlDatabase("QMYSQL", qSqlDatabaseName)
-database.setHostName("127.0.0.1")
-database.setDatabaseName("influx")
-database.setPort(3306)
-database.open("test", "test")
-
-                """), 
+                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("newQSqlDatabase"), newIdentNode(!"qSqlDatabaseName"))),
+                newCall(!"setHostName", newIdentNode(!"database"), newIdentNode(!"dbHostName")),
+                newCall(!"setDatabaseName", newIdentNode(!"database"), dbName),
+                newCall(!"setPort", newIdentNode(!"database"), newIdentNode(!"dbPort")),
+                newCall(!"open", newIdentNode(!"database"), dbUsername, dbPassword),
                 safeBodyClose
             )
         )
@@ -164,8 +164,8 @@ template useQuery(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
     var query = database.qSqlQuery()
     sql.useQuery(query)
 
-proc runDBQueryWithTransaction(sql: cstring) =
-    useDB:
+proc runDBQueryWithTransaction(sql: cstring, dbName: string, dbUsername: string, dbPassword: string) =
+    useDB(dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='UTC'".useQuery(database)
 
@@ -289,8 +289,9 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
             entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string])  =
-    useDB:
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+                         dbName: string, dbUsername: string, dbPassword: string)  =
+    useDB(dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='UTC'".useQuery(database)
 
@@ -433,6 +434,19 @@ proc getQuery(request: Request) {.async.} =
     var internedStrings = initTable[string, ref string]()
     var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
 
+    var dbName = ""
+    var dbUsername = ""
+    var dbPassword = ""
+
+    if params.hasKey("db"):
+        dbName = params["db"]
+
+    if params.hasKey("u"):
+        dbUsername = params["u"]
+
+    if params.hasKey("p"):
+        dbUsername = params["p"]
+
     var timeInterned: ref string
     new(timeInterned)
     timeInterned[] = "time"
@@ -452,7 +466,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.writeln(sql)
 
         try:
-            sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings)
+            sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
         except DBQueryException:
             stdout.write("/query: ")
             stdout.write(line)
@@ -477,6 +491,21 @@ import posix
 proc postWrite(request: Request) {.async.} =
     GC_disable()
     defer: GC_enable()
+
+    let params = getParams(request)
+
+    var dbName = ""
+    var dbUsername = ""
+    var dbPassword = ""
+
+    if params.hasKey("db"):
+        dbName = params["db"]
+
+    if params.hasKey("u"):
+        dbUsername = params["u"]
+
+    if params.hasKey("p"):
+        dbUsername = params["p"]
 
     var internedStrings = initTable[string, ref string]()
     var entries = initTable[ref string, SQLEntryValues]()
@@ -559,7 +588,7 @@ proc postWrite(request: Request) {.async.} =
             stdout.write("/write: ")
             stdout.writeln(sql)
 
-        sql.runDBQueryWithTransaction
+        sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
 
     result = request.respond(Http204, "", newStringTable(modeCaseSensitive))
@@ -605,8 +634,20 @@ proc router(request: Request) {.async.} =
         result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), newStringTable("Content-Type", "application/json", modeCaseSensitive))
 
 block:
+    if paramCount() < 3:
+        stderr.writeln("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port>")
+        quit(QuitFailure)
+
+    var dbHostnameString = paramStr(1)
+    dbPort = cint(paramStr(2).parseInt)
+
+    dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
+    defer: deallocShared(dbHostname)
+
+    copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
+
     try:
-        waitFor newMicroAsyncHttpServer().serve(Port(8086), router)
+        waitFor newMicroAsyncHttpServer().serve(Port(paramStr(3).parseInt), router)
     except Exception:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
