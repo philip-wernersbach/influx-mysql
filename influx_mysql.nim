@@ -488,6 +488,11 @@ proc getQuery(request: Request) {.async.} =
 
 import posix
 
+when defined(linux):
+    import linux
+else:
+    const MSG_DONTWAIT = 0
+
 proc postWrite(request: Request) {.async.} =
     GC_disable()
     defer: GC_enable()
@@ -534,9 +539,9 @@ proc postWrite(request: Request) {.async.} =
         if chunkLen > BufferSize:
             chunkLen = BufferSize
 
-        request.client.rawRecv(readNow, chunkLen)
+        request.client.rawRecv(readNow, chunkLen, MSG_DONTWAIT)
         if readNow.len < 1:
-            if errno != EAGAIN:
+            if (errno != EAGAIN) and (errno != EWOULDBLOCK):
                 raise newException(IOError, "Client socket disconnected!")
             else:
                 if noReadsStart == Time(0):
