@@ -14,6 +14,7 @@ import tables
 import strtabs
 import marshal
 import json
+import base64
 import cgi
 import times
 import os
@@ -408,6 +409,26 @@ proc getOrHeadPing(request: Request) {.async.} =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
     result = request.respond(Http204, "", newStringTable("X-Influxdb-Version", "0.9.3-compatible-influxmysql", "Date", date, modeCaseSensitive))
 
+proc basicAuthToUrlParam(request: var Request) =
+    if not request.headers.hasKey("Authorization"):
+        return
+
+    let parts = request.headers["Authorization"].split(' ')
+
+    if (parts.len != 2) or (parts[0] != "Basic"):
+        return
+
+    let userNameAndPassword = base64.decode(parts[1]).split(':')
+
+    if (userNameAndPassword.len != 2):
+        return
+
+    request.url.query.add("&u=")
+    request.url.query.add(userNameAndPassword[0].encodeUrl)
+
+    request.url.query.add("&p=")
+    request.url.query.add(userNameAndPassword[1].encodeUrl)
+
 proc getQuery(request: Request) {.async.} =
     GC_disable()
     defer: GC_enable()
@@ -613,6 +634,10 @@ proc postWrite(request: Request) {.async.} =
     line = nil
 
 proc router(request: Request) {.async.} =
+    var request = request
+
+    request.basicAuthToUrlParam
+
     when defined(logrequests):
         stdout.write(request.url.path)
         stdout.write('?')
