@@ -91,6 +91,26 @@ type
         Microsecond
         Nanosecond
 
+when getEnv("cachecontrolmaxage") != "":
+    const cachecontrolmaxage: string = getEnv("cachecontrolmaxage")
+else:
+    const cachecontrolmaxage: string = "0"
+
+const cacheControlDontCacheHeader = "private, max-age=0, s-maxage=0, no-cache"
+const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s-maxage=" & cachecontrolmaxage
+
+template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDoCacheHeader, modeCaseSensitive)
+
+template JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
+
+template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
+
+template PING_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
+
 var dbHostname: cstring = nil
 var dbPort: cint = 0
 
@@ -407,7 +427,7 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
 
 proc getOrHeadPing(request: Request) {.async.} =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
-    result = request.respond(Http204, "", newStringTable("X-Influxdb-Version", "0.9.3-compatible-influxmysql", "Date", date, modeCaseSensitive))
+    result = request.respond(Http204, "", PING_RESPONSE_HEADERS)
 
 proc basicAuthToUrlParam(request: var Request) =
     if not request.headers.hasKey("Authorization"):
@@ -495,7 +515,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.writeln(sql)
             raise getCurrentException()
 
-    result = request.respond(Http200, entries.toQueryResponse, newStringTable("Content-Type", "application/json", modeCaseSensitive))
+    result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS)
 
     # Explicitly hint the garbage collector that it can collect these.
     for entry in entries.items:
@@ -541,7 +561,7 @@ proc postWrite(request: Request) {.async.} =
 
     let contentLength = request.headers["Content-Length"].parseInt
     if (contentLength == 0):
-        result = request.respond(Http400, "Content-Length required, but not provided!")
+        result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
         return
 
     var timeInterned: ref string
@@ -617,7 +637,7 @@ proc postWrite(request: Request) {.async.} =
         sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
 
-    result = request.respond(Http204, "", newStringTable(modeCaseSensitive))
+    result = request.respond(Http204, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
 
     # Explicitly hint the garbage collector that it can collect these.
     for entry in entries.values:
@@ -654,14 +674,14 @@ proc router(request: Request) {.async.} =
             let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
             stdout.writeln(responseMessage)
 
-            asyncCheck request.respond(Http400, responseMessage, newStringTable(modeCaseSensitive))
+            asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
     except DBQueryException, URLParameterNotFoundError:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
         stderr.writeln(getCurrentExceptionMsg())
 
-        result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), newStringTable("Content-Type", "application/json", modeCaseSensitive))
+        result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS)
 
 block:
     if paramCount() < 3:
