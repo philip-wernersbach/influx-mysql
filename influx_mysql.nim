@@ -473,7 +473,15 @@ proc getQuery(request: Request) {.async.} =
         raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
 
     var internedStrings = initTable[string, ref string]()
+    defer: internedStrings = initTable[string, ref string]()
+
     var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
+    defer:
+        # Explicitly hint the garbage collector that it can collect these.
+        for entry in entries.items:
+            entry.data.entries.removeAll
+
+        entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
 
     var dbName = ""
     var dbUsername = ""
@@ -489,6 +497,7 @@ proc getQuery(request: Request) {.async.} =
         dbPassword = params["p"]
 
     var timeInterned: ref string
+    defer: timeInterned = nil
     new(timeInterned)
     timeInterned[] = "time"
 
@@ -517,16 +526,6 @@ proc getQuery(request: Request) {.async.} =
 
     result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS)
 
-    # Explicitly hint the garbage collector that it can collect these.
-    for entry in entries.items:
-        entry.data.entries.removeAll
-
-    internedStrings = initTable[string, ref string]()
-    entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
-
-    GC_enable()
-    timeInterned = nil
-
 import posix
 
 when defined(linux):
@@ -554,10 +553,21 @@ proc postWrite(request: Request) {.async.} =
         dbPassword = params["p"]
 
     var internedStrings = initTable[string, ref string]()
+    defer: internedStrings = initTable[string, ref string]()
+
     var entries = initTable[ref string, SQLEntryValues]()
+    defer:
+        # Explicitly hint the garbage collector that it can collect these.
+        for entry in entries.values:
+            entry.entries.removeAll
+
+        entries = initTable[ref string, SQLEntryValues]()
+
     var sql = newStringOfCap(2097152)
+    defer: sql = nil
 
     var readNow = newString(BufferSize)
+    defer: readNow = nil
 
     let contentLength = request.headers["Content-Length"].parseInt
     if (contentLength == 0):
@@ -565,13 +575,18 @@ proc postWrite(request: Request) {.async.} =
         return
 
     var timeInterned: ref string
+    defer: timeInterned = nil
     new(timeInterned)
     timeInterned[] = "time"
 
     internedStrings["time"] = timeInterned
 
     var lines = request.client.recvWholeBuffer
+    defer: lines = nil
+
     var line = ""
+    defer: line = nil
+
     var read = 0
     var noReadsStart: Time = Time(0)
 
@@ -638,20 +653,6 @@ proc postWrite(request: Request) {.async.} =
         sql.setLen(0)
 
     result = request.respond(Http204, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
-
-    # Explicitly hint the garbage collector that it can collect these.
-    for entry in entries.values:
-        entry.entries.removeAll
-
-    internedStrings = initTable[string, ref string]()
-    entries = initTable[ref string, SQLEntryValues]()
-    sql = nil
-    readNow = nil
-    timeInterned = nil
-    lines = nil
-
-    GC_enable()
-    line = nil
 
 proc router(request: Request) {.async.} =
     var request = request
