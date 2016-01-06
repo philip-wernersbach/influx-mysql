@@ -73,4 +73,4 @@ proc serve*(server: MicroAsyncHttpServer, port: Port, callback: proc (request: R
             let e = getCurrentException()
             stderr.write(e.getStackTrace())
             stderr.write("Error: unhandled exception: ")
-            stderr.writeln(getCurrentExceptionMsg())
+            stderr.writeLine(getCurrentExceptionMsg())

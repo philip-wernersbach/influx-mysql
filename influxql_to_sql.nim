@@ -1,4 +1,3 @@
-import unsigned
 import strutils
 
 import influx_line_protocol_to_sql
@@ -53,6 +52,8 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
                 discard
 
             return
+        else:
+            discard
 
     newPart.add("INTERVAL ")
     part.collectNumericPrefix(newPart)
@@ -151,6 +152,8 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): s
             if parts[1] == "SERIES":
                 parts[0] = "DELETE"
                 parts[1] = ""
+        else:
+            discard
 
     for i in countUp(0, parts.len - 1):
         let part = parts[i]

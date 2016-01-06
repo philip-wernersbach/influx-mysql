@@ -1,13 +1,12 @@
 {.boundChecks: on.}
 
 import macros
-import unsigned
 import strtabs
 import strutils
 import asyncdispatch
 import asyncnet
 import asynchttpserver
-from sockets import BufferSize
+from net import BufferSize
 import lists
 import hashes as hashes
 import tables
@@ -33,7 +32,9 @@ import influx_line_protocol_to_sql
 
 type 
     DBQueryException = object of IOError
-    URLParameterNotFoundError = object of ValueError
+    URLParameterError = object of ValueError
+    URLParameterNotFoundError = object of URLParameterError
+    URLParameterInvalidError = object of URLParameterError
 
     JSONEntryValues = tuple
         order: OrderedTableRef[ref string, bool] not nil
@@ -114,7 +115,7 @@ template PING_RESPONSE_HEADERS(): StringTableRef =
 var dbHostname: cstring = nil
 var dbPort: cint = 0
 
-template hash(x: ref string): THash =
+template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
 
 macro useDB(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
@@ -364,8 +365,8 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: Ep
                         fieldName = "mean"
 
                 var value = record.toJSONField(i, epoch)
-                var fieldNameInterned = internedStrings[fieldName]
 
+                var fieldNameInterned = internedStrings.getOrDefault(fieldName)
                 if fieldnameInterned == nil:
                     new(fieldNameInterned)
                     fieldNameInterned[] = fieldName
@@ -456,7 +457,7 @@ proc getQuery(request: Request) {.async.} =
     let params = getParams(request)
 
     let urlQuery = params["q"]
-    let specifiedEpochFormat = params["epoch"]
+    let specifiedEpochFormat = params.getOrDefault("epoch")
 
     var epoch = EpochFormat.RFC3339
 
@@ -468,6 +469,8 @@ proc getQuery(request: Request) {.async.} =
         of "ms": epoch = EpochFormat.Millisecond
         of "u": epoch = EpochFormat.Microsecond
         of "ns": epoch = EpochFormat.Nanosecond
+        else:
+            raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
 
     if urlQuery == nil:
         raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
@@ -513,7 +516,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.write("/query: ")
             stdout.write(line)
             stdout.write(" --> ")
-            stdout.writeln(sql)
+            stdout.writeLine(sql)
 
         try:
             sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
@@ -521,7 +524,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.write("/query: ")
             stdout.write(line)
             stdout.write(" --> ")
-            stdout.writeln(sql)
+            stdout.writeLine(sql)
             raise getCurrentException()
 
     result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS)
@@ -569,8 +572,12 @@ proc postWrite(request: Request) {.async.} =
     var readNow = newString(BufferSize)
     defer: readNow = nil
 
-    let contentLength = request.headers["Content-Length"].parseInt
-    if (contentLength == 0):
+    var contentLength = 0
+    
+    if request.headers.hasKey("Content-Length"):
+        contentLength = request.headers["Content-Length"].parseInt
+
+    if contentLength == 0:
         result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
         return
 
@@ -628,7 +635,7 @@ proc postWrite(request: Request) {.async.} =
             if line.len > 0:
                 when defined(logrequests):
                     stdout.write("/write: ")
-                    stdout.writeln(line)
+                    stdout.writeLine(line)
 
                 line.lineProtocolToSQLEntryValues(entries, internedStrings)
 
@@ -647,7 +654,7 @@ proc postWrite(request: Request) {.async.} =
 
         when defined(logrequests):
             stdout.write("/write: ")
-            stdout.writeln(sql)
+            stdout.writeLine(sql)
 
         sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
@@ -662,7 +669,7 @@ proc router(request: Request) {.async.} =
     when defined(logrequests):
         stdout.write(request.url.path)
         stdout.write('?')
-        stdout.writeln(request.url.query)
+        stdout.writeLine(request.url.query)
 
     try:
         if (request.reqMethod == "get") and (request.url.path == "/query"):
@@ -673,20 +680,20 @@ proc router(request: Request) {.async.} =
             asyncCheck request.getOrHeadPing
         else:
             let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
-            stdout.writeln(responseMessage)
+            stdout.writeLine(responseMessage)
 
             asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
-    except DBQueryException, URLParameterNotFoundError:
+    except DBQueryException, URLParameterError:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
-        stderr.writeln(getCurrentExceptionMsg())
+        stderr.writeLine(getCurrentExceptionMsg())
 
         result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS)
 
 block:
     if paramCount() < 3:
-        stderr.writeln("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port>")
+        stderr.writeLine("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port>")
         quit(QuitFailure)
 
     var dbHostnameString = paramStr(1)
@@ -703,6 +710,6 @@ block:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
-        stderr.writeln(getCurrentExceptionMsg())
+        stderr.writeLine(getCurrentExceptionMsg())
 
         quit(QuitFailure)

@@ -1,4 +1,3 @@
-import unsigned
 import strutils
 import hashes as hashes
 import tables
@@ -13,7 +12,7 @@ type
         order: OrderedTableRef[ref string, bool] not nil
         entries: SinglyLinkedRefList[Table[ref string, string]] not nil
 
-template hash(x: ref string): THash =
+template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
 
 proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
@@ -97,7 +96,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     timestampSQL.add(timestamp)
     timestampSQL.add(" * 0.000000001)")
 
-    var keyInterned = internedStrings[key]
+    var keyInterned = internedStrings.getOrDefault(key)
     if keyInterned == nil:
         new(keyInterned)
         keyInterned[] = key
@@ -120,7 +119,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         let tag = tagAndValue.getToken('=', 0)
         var value = tagAndValue[tag.len+1..tagAndValue.len-1]
 
-        var tagInterned = internedStrings[tag]
+        var tagInterned = internedStrings.getOrDefault(tag)
         if tagInterned == nil:
             new(tagInterned)
             tagInterned[] = tag
@@ -137,7 +136,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         let name = nameAndValue.getToken('=', 0)
         var value = nameAndValue[name.len+1..nameAndValue.len-1]
 
-        var nameInterned = internedStrings[name]
+        var nameInterned = internedStrings.getOrDefault(name)
         if nameInterned == nil:
             new(nameInterned)
             nameInterned[] = name

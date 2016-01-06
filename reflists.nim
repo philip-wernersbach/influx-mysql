@@ -33,7 +33,7 @@ when not defined(disablereflists) and (compileOption("gc", "v2") or compileOptio
             let next = current.next
             current.next = nil
 
-            free(current)
+            dealloc(current)
             GC_unref(value)
             current = next
 
