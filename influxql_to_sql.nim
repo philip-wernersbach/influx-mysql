@@ -152,6 +152,10 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): s
             if parts[1] == "SERIES":
                 parts[0] = "DELETE"
                 parts[1] = ""
+        of "RAWSQL":
+            parts[0] = ""
+            result = parts.join(" ")
+            return
         else:
             discard
 
