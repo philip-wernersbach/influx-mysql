@@ -664,14 +664,14 @@ proc postWrite(request: Request) {.async.} =
 proc router(request: Request) {.async.} =
     var request = request
 
-    request.basicAuthToUrlParam
-
-    when defined(logrequests):
-        stdout.write(request.url.path)
-        stdout.write('?')
-        stdout.writeLine(request.url.query)
-
     try:
+        request.basicAuthToUrlParam
+
+        when defined(logrequests):
+            stdout.write(request.url.path)
+            stdout.write('?')
+            stdout.writeLine(request.url.query)
+
         if (request.reqMethod == "get") and (request.url.path == "/query"):
             asyncCheck request.getQuery
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
@@ -683,7 +683,7 @@ proc router(request: Request) {.async.} =
             stdout.writeLine(responseMessage)
 
             asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
-    except DBQueryException, URLParameterError:
+    except IOError, ValueError:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
