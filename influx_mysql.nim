@@ -461,7 +461,7 @@ proc getQuery(request: Request) {.async.} =
 
     var epoch = EpochFormat.RFC3339
 
-    if specifiedEpochFormat != nil:
+    if specifiedEpochFormat != "":
         case specifiedEpochFormat:
         of "h": epoch = EpochFormat.Hour
         of "m": epoch = EpochFormat.Minute
