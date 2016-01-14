@@ -311,7 +311,7 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
             entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
     useDB(dbName, dbUsername, dbPassword):
         block:
@@ -335,19 +335,20 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, epoch: Ep
 
             var entryValues = newTable[ref string, JSONField]()
 
-            # For strict InfluxDB compatibility:
-            #
-            # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
-            # SQL databases do not do this, they return nothing if there is no data. So we need to add these
-            # NULLs.
-            var newTime = uint64(record.value("time").toMSecsSinceEpoch)
+            if fillNull:
+                # For strict InfluxDB compatibility:
+                #
+                # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
+                # SQL databases do not do this, they return nothing if there is no data. So we need to add these
+                # NULLs.
+                var newTime = uint64(record.value("time").toMSecsSinceEpoch)
 
-            if (period > uint64(0)) and not first:
-                entries.addNulls(order, lastTime, newTime, period, epoch, internedStrings)
-            else:
-                first = false
+                if (period > uint64(0)) and not first:
+                    entries.addNulls(order, lastTime, newTime, period, epoch, internedStrings)
+                else:
+                    first = false
 
-            lastTime = newTime
+                lastTime = newTime
 
             for i in countUp(0, count):
                 var fieldNameConst = record.fieldName(i).toUtf8.constData.umc
@@ -509,8 +510,9 @@ proc getQuery(request: Request) {.async.} =
     for line in urlQuery.splitLines:
         var series: string
         var period = uint64(0)
+        var fillNull = false
 
-        let sql = line.influxQlToSql(series, period)
+        let sql = line.influxQlToSql(series, period, fillNull)
         
         when defined(logrequests):
             stdout.write("/query: ")
@@ -519,7 +521,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.writeLine(sql)
 
         try:
-            sql.runDBQueryAndUnpack(series, period, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+            sql.runDBQueryAndUnpack(series, period, fillNull, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
         except DBQueryException:
             stdout.write("/query: ")
             stdout.write(line)

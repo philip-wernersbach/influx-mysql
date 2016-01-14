@@ -64,7 +64,7 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
     if newPart.len > (intervalType.len + 10):
         parts[i] = newPart
 
-proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): string =
+proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
 
@@ -159,7 +159,7 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): s
         else:
             discard
 
-    for i in countUp(0, parts.len - 1):
+    for i in countUp(0, partsLen - 1):
         let part = parts[i]
 
         if part.len < 1:
@@ -168,6 +168,28 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64): s
         case part:
         of "now()":
             parts[i] = "NOW(6)"
+        of "GROUP":
+            let potentialByPos = i + 1
+            let potentialFillStart = potentialByPos + 2
+
+            if (partsLen > potentialByPos) and (parts[potentialByPos] == "BY"):
+                fillNull = true
+
+                if partsLen > potentialFillStart:
+                    for j in countUp(potentialFillStart, partsLen - 1):
+                        case parts[j]:
+                        of "fill(null)":
+                            fillNull = true
+                            parts[j] = ""
+
+                            break
+                        of "fill(none)":
+                            fillNull = false
+                            parts[j] = ""
+
+                            break
+                        else:
+                            discard
         else:
             if (part[part.len - 1] == ')') and part.startsWith("time("):
                 let timeframeType = part[part.len-2]
