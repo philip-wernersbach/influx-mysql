@@ -812,8 +812,6 @@ block:
         quitUsage()
 
     dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
-    defer: deallocShared(dbHostname)
-
     copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
 
     if params == 3:
