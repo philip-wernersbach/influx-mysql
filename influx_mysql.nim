@@ -753,23 +753,71 @@ proc router(request: Request) {.async.} =
 
         result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), errorResponseHeaders)
 
+proc quitUsage() =
+    stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> <influxdb address:influxdb port> [cors allowed origin]")
+    quit(QuitFailure)
+
 block:
+    var dbHostnameString = "localhost"
+    dbPort = 3306
+
+    var httpServerHostname = ""
+    var httpServerPort = 8086
+
     let params = paramCount()
 
-    if (params < 3) or (params > 4):
-        stderr.writeLine("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port> [cors allowed origin]")
-        quit(QuitFailure)
+    if (params < 2) or (params > 3):
+        if (params < 2):
+            stderr.writeLine("Error: Not enough arguments specified!")
+        else:
+            stderr.writeLine("Error: Too many arguments specified!")
 
-    var dbHostnameString = paramStr(1)
-    dbPort = cint(paramStr(2).parseInt)
+        quitUsage()
+
+    let dbConnectionInfo = paramStr(1).split(':')
+    let httpServerInfo = paramStr(2).split(':')
+
+    case dbConnectionInfo.len:
+    of 0:
+        discard
+    of 1:
+        dbHostnameString = dbConnectionInfo[0]
+    of 2:
+        dbHostnameString = dbConnectionInfo[0]
+
+        try:
+            dbPort = cint(dbConnectionInfo[1].parseInt)
+        except ValueError:
+            stderr.writeLine("Error: Invalid mysql port specified!")
+            quitUsage()
+    else:
+        stderr.writeLine("Error: Invalid mysql address, mysql port combination specified!")
+        quitUsage()
+
+    case httpServerInfo.len:
+    of 0:
+        discard
+    of 1:
+        httpServerHostname = httpServerInfo[0]
+    of 2:
+        httpServerHostname = httpServerInfo[0]
+
+        try:
+            httpServerPort = httpServerInfo[1].parseInt
+        except ValueError:
+            stderr.writeLine("Error: Invalid influxdb port specified!")
+            quitUsage()
+    else:
+        stderr.writeLine("Error: Invalid influxdb address, influxdb port combination specified!")
+        quitUsage()
 
     dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
     defer: deallocShared(dbHostname)
 
     copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
 
-    if params == 4:
-        var corsAllowOriginString = paramStr(4)
+    if params == 3:
+        var corsAllowOriginString = paramStr(3)
 
         corsAllowOrigin = cast[cstring](allocShared0(corsAllowOriginString.len + 1))
         copyMem(addr(corsAllowOrigin[0]), addr(corsAllowOriginString[0]), corsAllowOriginString.len)
@@ -781,7 +829,7 @@ block:
             deallocShared(corsAllowOrigin)
 
     try:
-        waitFor newMicroAsyncHttpServer().serve(Port(paramStr(3).parseInt), router)
+        waitFor newMicroAsyncHttpServer().serve(Port(httpServerPort), router, httpServerHostname)
     except Exception:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
