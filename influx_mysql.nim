@@ -92,13 +92,21 @@ type
         Microsecond
         Nanosecond
 
+const QUERY_HTTP_METHODS = "GET"
+const WRITE_HTTP_METHODS = "POST"
+const PING_HTTP_METHODS = "GET, HEAD"
+
+const cacheControlZeroAge: string = "0"
+
 when getEnv("cachecontrolmaxage") != "":
     const cachecontrolmaxage: string = getEnv("cachecontrolmaxage")
 else:
     const cachecontrolmaxage: string = "0"
 
-const cacheControlDontCacheHeader = "private, max-age=0, s-maxage=0, no-cache"
+const cacheControlDontCacheHeader = "private, max-age=" & cacheControlZeroAge & ", s-maxage=" & cacheControlZeroAge & ", no-cache"
 const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s-maxage=" & cachecontrolmaxage
+
+var corsAllowOrigin: cstring = nil
 
 template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDoCacheHeader, modeCaseSensitive)
@@ -106,8 +114,11 @@ template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
 template JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
 
-template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
+template TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
+
+template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDoCacheHeader, modeCaseSensitive)
 
 template PING_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
@@ -427,9 +438,31 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     json.add("results", results)
     result = $json
 
+proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string, accessControlMaxAge: string): StringTableRef =
+    if corsAllowOrigin != nil:
+        if allowMethods != nil:
+            headers["Access-Control-Allow-Methods"] = allowMethods
+
+        if accessControlMaxAge != nil:
+            headers["Access-Control-Max-Age"] = accessControlMaxAge
+
+        headers["Access-Control-Allow-Origin"] = $corsAllowOrigin
+        headers["Access-Control-Allow-Headers"] = "Accept, Origin, Authorization"
+        headers["Access-Control-Allow-Credentials"] = "true"
+
+    result = headers
+
+proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string): StringTableRef =
+    if headers["Cache-Control"] == cacheControlDoCacheHeader:
+        result = headers.withCorsIfNeeded(allowMethods, cachecontrolmaxage)
+    elif headers["Cache-Control"] == cacheControlDontCacheHeader:
+        result = headers.withCorsIfNeeded(allowMethods, cacheControlZeroAge)
+    else:
+        result = headers.withCorsIfNeeded(allowMethods, nil)
+
 proc getOrHeadPing(request: Request) {.async.} =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
-    result = request.respond(Http204, "", PING_RESPONSE_HEADERS)
+    result = request.respond(Http204, "", PING_RESPONSE_HEADERS.withCorsIfNeeded(PING_HTTP_METHODS))
 
 proc basicAuthToUrlParam(request: var Request) =
     if not request.headers.hasKey("Authorization"):
@@ -529,7 +562,7 @@ proc getQuery(request: Request) {.async.} =
             stdout.writeLine(sql)
             raise getCurrentException()
 
-    result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS)
+    result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
 
 import posix
 
@@ -580,7 +613,7 @@ proc postWrite(request: Request) {.async.} =
         contentLength = request.headers["Content-Length"].parseInt
 
     if contentLength == 0:
-        result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
+        result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
         return
 
     var timeInterned: ref string
@@ -661,7 +694,10 @@ proc postWrite(request: Request) {.async.} =
         sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
 
-    result = request.respond(Http204, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
+    result = request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+
+template optionsCors(request: Request, allowMethods: string): Future[void] =
+    request.respond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
 
 proc router(request: Request) {.async.} =
     var request = request
@@ -676,26 +712,52 @@ proc router(request: Request) {.async.} =
 
         if (request.reqMethod == "get") and (request.url.path == "/query"):
             asyncCheck request.getQuery
+            return
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
             asyncCheck request.postWrite
+            return
         elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
             asyncCheck request.getOrHeadPing
-        else:
-            let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
-            stdout.writeLine(responseMessage)
+            return
+        elif (request.reqMethod == "options") and (corsAllowOrigin != nil):
+            case request.url.path:
+            of "/query":
+                asyncCheck request.optionsCors(QUERY_HTTP_METHODS)
+                return
+            of "/write":
+                asyncCheck request.optionsCors(WRITE_HTTP_METHODS)
+                return
+            of "/ping":
+                asyncCheck request.optionsCors(PING_HTTP_METHODS)
+                return
+            else:
+                discard
 
-            asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_RESPONSE_HEADERS)
+        # Fall through on purpose, we didn't have a matching route.
+        let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
+        stdout.writeLine(responseMessage)
+
+        asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod.toUpper))
     except IOError, ValueError:
         let e = getCurrentException()
         stderr.write(e.getStackTrace())
         stderr.write("Error: unhandled exception: ")
         stderr.writeLine(getCurrentExceptionMsg())
 
-        result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS)
+        var errorResponseHeaders = JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS
+
+        if request.reqMethod != nil:
+            errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(request.reqMethod.toUpper)
+        else:
+            errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(nil)
+
+        result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), errorResponseHeaders)
 
 block:
-    if paramCount() < 3:
-        stderr.writeLine("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port>")
+    let params = paramCount()
+
+    if (params < 3) or (params > 4):
+        stderr.writeLine("Usage: influx_mysql <mysql hostname> <mysql port> <influxdb port> [cors allowed origin]")
         quit(QuitFailure)
 
     var dbHostnameString = paramStr(1)
@@ -705,6 +767,18 @@ block:
     defer: deallocShared(dbHostname)
 
     copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
+
+    if params == 4:
+        var corsAllowOriginString = paramStr(4)
+
+        corsAllowOrigin = cast[cstring](allocShared0(corsAllowOriginString.len + 1))
+        copyMem(addr(corsAllowOrigin[0]), addr(corsAllowOriginString[0]), corsAllowOriginString.len)
+
+    defer:
+        deallocShared(dbHostname)
+
+        if (corsAllowOrigin != nil):
+            deallocShared(corsAllowOrigin)
 
     try:
         waitFor newMicroAsyncHttpServer().serve(Port(paramStr(3).parseInt), router)
