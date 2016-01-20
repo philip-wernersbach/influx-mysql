@@ -64,7 +64,7 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
     if newPart.len > (intervalType.len + 10):
         parts[i] = newPart
 
-proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool): string =
+proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
 
@@ -154,6 +154,16 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                 parts[1] = ""
         of "RAWSQL":
             parts[0] = ""
+
+            case parts[1]:
+            of "NOCACHE":
+                parts[1] = ""
+                cache = false
+            of "CACHE":
+                parts[1] = ""
+            else:
+                discard
+
             result = parts.join(" ")
             return
         else:

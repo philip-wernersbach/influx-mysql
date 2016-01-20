@@ -540,12 +540,14 @@ proc getQuery(request: Request) {.async.} =
 
     internedStrings["time"] = timeInterned
 
+    var cache = true
+
     for line in urlQuery.splitLines:
         var series: string
         var period = uint64(0)
         var fillNull = false
 
-        let sql = line.influxQlToSql(series, period, fillNull)
+        let sql = line.influxQlToSql(series, period, fillNull, cache)
         
         when defined(logrequests):
             stdout.write("/query: ")
@@ -562,7 +564,10 @@ proc getQuery(request: Request) {.async.} =
             stdout.writeLine(sql)
             raise getCurrentException()
 
-    result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+    if cache != false:
+        result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+    else:
+        result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
 
 import posix
 
