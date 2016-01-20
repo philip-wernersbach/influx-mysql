@@ -6,8 +6,9 @@ proc influxQlToSql(influxQl: string): string =
     var fillNull = false
     var cache = true
 
-    result = influxQl.influxQlToSql(series, period, fillNull, cache)
+    result = influxQl.influxQlToSql(series, period, fillNull, cache) &
+        " /* series=" & (if series != nil: series else: "<nil>") & " period=" & $period & " fillNull=" & $fillNull & " cache=" & $cache & " */"
 
 block:
     for line in stdin.lines:
-        stdout.write(line.influxQlToSql)
+        stdout.writeLine(line.influxQlToSql)
