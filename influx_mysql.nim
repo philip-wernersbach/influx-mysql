@@ -485,89 +485,93 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
 proc getQuery(request: Request) {.async.} =
-    GC_disable()
-    defer: GC_enable()
-
-    let params = getParams(request)
-
-    let urlQuery = params["q"]
-    let specifiedEpochFormat = params.getOrDefault("epoch")
-
-    var epoch = EpochFormat.RFC3339
-
-    if specifiedEpochFormat != "":
-        case specifiedEpochFormat:
-        of "h": epoch = EpochFormat.Hour
-        of "m": epoch = EpochFormat.Minute
-        of "s": epoch = EpochFormat.Second
-        of "ms": epoch = EpochFormat.Millisecond
-        of "u": epoch = EpochFormat.Microsecond
-        of "ns": epoch = EpochFormat.Nanosecond
-        else:
-            raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
-
-    if urlQuery == nil:
-        raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
-
     var internedStrings = initTable[string, ref string]()
-    defer: internedStrings = initTable[string, ref string]()
-
-    var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
-    defer:
-        # Explicitly hint the garbage collector that it can collect these.
-        for entry in entries.items:
-            entry.data.entries.removeAll
-
-        entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
-
-    var dbName = ""
-    var dbUsername = ""
-    var dbPassword = ""
-
-    if params.hasKey("db"):
-        dbName = params["db"]
-
-    if params.hasKey("u"):
-        dbUsername = params["u"]
-
-    if params.hasKey("p"):
-        dbPassword = params["p"]
 
     var timeInterned: ref string
-    defer: timeInterned = nil
     new(timeInterned)
     timeInterned[] = "time"
 
     internedStrings["time"] = timeInterned
 
-    var cache = true
+    var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
 
-    for line in urlQuery.splitLines:
-        var series: string
-        var period = uint64(0)
-        var fillNull = false
+    try:
+        GC_disable()
 
-        let sql = line.influxQlToSql(series, period, fillNull, cache)
-        
-        when defined(logrequests):
-            stdout.write("/query: ")
-            stdout.write(line)
-            stdout.write(" --> ")
-            stdout.writeLine(sql)
+        let params = getParams(request)
 
+        let urlQuery = params["q"]
+        let specifiedEpochFormat = params.getOrDefault("epoch")
+
+        var epoch = EpochFormat.RFC3339
+
+        if specifiedEpochFormat != "":
+            case specifiedEpochFormat:
+            of "h": epoch = EpochFormat.Hour
+            of "m": epoch = EpochFormat.Minute
+            of "s": epoch = EpochFormat.Second
+            of "ms": epoch = EpochFormat.Millisecond
+            of "u": epoch = EpochFormat.Microsecond
+            of "ns": epoch = EpochFormat.Nanosecond
+            else:
+                raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
+
+        if urlQuery == nil:
+            raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
+
+        var dbName = ""
+        var dbUsername = ""
+        var dbPassword = ""
+
+        if params.hasKey("db"):
+            dbName = params["db"]
+
+        if params.hasKey("u"):
+            dbUsername = params["u"]
+
+        if params.hasKey("p"):
+            dbPassword = params["p"]
+
+        var cache = true
+
+        for line in urlQuery.splitLines:
+            var series: string
+            var period = uint64(0)
+            var fillNull = false
+
+            let sql = line.influxQlToSql(series, period, fillNull, cache)
+            
+            when defined(logrequests):
+                stdout.write("/query: ")
+                stdout.write(line)
+                stdout.write(" --> ")
+                stdout.writeLine(sql)
+
+            try:
+                sql.runDBQueryAndUnpack(series, period, fillNull, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+            except DBQueryException:
+                stdout.write("/query: ")
+                stdout.write(line)
+                stdout.write(" --> ")
+                stdout.writeLine(sql)
+                raise getCurrentException()
+
+        if cache != false:
+            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+        else:
+            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+    finally:
         try:
-            sql.runDBQueryAndUnpack(series, period, fillNull, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
-        except DBQueryException:
-            stdout.write("/query: ")
-            stdout.write(line)
-            stdout.write(" --> ")
-            stdout.writeLine(sql)
-            raise getCurrentException()
+            # Explicitly hint the garbage collector that it can collect these.
+            for entry in entries.items:
+                entry.data.entries.removeAll
 
-    if cache != false:
-        result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
-    else:
-        result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+            entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
+
+            timeInterned = nil
+            internedStrings = initTable[string, ref string]()
+        finally:
+            GC_enable()
 
 import posix
 
@@ -577,129 +581,133 @@ else:
     const MSG_DONTWAIT = 0
 
 proc postWrite(request: Request) {.async.} =
-    GC_disable()
-    defer: GC_enable()
-
-    let params = getParams(request)
-
-    var dbName = ""
-    var dbUsername = ""
-    var dbPassword = ""
-
-    if params.hasKey("db"):
-        dbName = params["db"]
-
-    if params.hasKey("u"):
-        dbUsername = params["u"]
-
-    if params.hasKey("p"):
-        dbPassword = params["p"]
-
-    var internedStrings = initTable[string, ref string]()
-    defer: internedStrings = initTable[string, ref string]()
-
-    var entries = initTable[ref string, SQLEntryValues]()
-    defer:
-        # Explicitly hint the garbage collector that it can collect these.
-        for entry in entries.values:
-            entry.entries.removeAll
-
-        entries = initTable[ref string, SQLEntryValues]()
-
-    var sql = newStringOfCap(2097152)
-    defer: sql = nil
-
-    var readNow = newString(BufferSize)
-    defer: readNow = nil
-
-    var contentLength = 0
-    
-    if request.headers.hasKey("Content-Length"):
-        contentLength = request.headers["Content-Length"].parseInt
-
-    if contentLength == 0:
-        result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
-        return
-
+    var lines: string
     var timeInterned: ref string
-    defer: timeInterned = nil
+
+    var line = ""
+    var sql = newStringOfCap(2097152)
+    var readNow = newString(BufferSize)
+    var internedStrings = initTable[string, ref string]()
+
     new(timeInterned)
     timeInterned[] = "time"
 
     internedStrings["time"] = timeInterned
 
-    var lines = request.client.recvWholeBuffer
-    defer: lines = nil
+    var entries = initTable[ref string, SQLEntryValues]()
 
-    var line = ""
-    defer: line = nil
+    try:
+        GC_disable()
 
-    var read = 0
-    var noReadsStart: Time = Time(0)
+        let params = getParams(request)
 
-    while read < contentLength:
-        var chunkLen = contentLength - read
-        if chunkLen > BufferSize:
-            chunkLen = BufferSize
+        var dbName = ""
+        var dbUsername = ""
+        var dbPassword = ""
 
-        request.client.rawRecv(readNow, chunkLen, MSG_DONTWAIT)
-        if readNow.len < 1:
-            if (errno != EAGAIN) and (errno != EWOULDBLOCK):
-                raise newException(IOError, "Client socket disconnected!")
-            else:
-                if noReadsStart == Time(0):
-                    noReadsStart = getTime()
-                    continue
+        if params.hasKey("db"):
+            dbName = params["db"]
+
+        if params.hasKey("u"):
+            dbUsername = params["u"]
+
+        if params.hasKey("p"):
+            dbPassword = params["p"]
+
+        var contentLength = 0
+        
+        if request.headers.hasKey("Content-Length"):
+            contentLength = request.headers["Content-Length"].parseInt
+
+        if contentLength == 0:
+            result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+            return
+
+        lines = request.client.recvWholeBuffer
+
+        var read = 0
+        var noReadsStart: Time = Time(0)
+
+        while read < contentLength:
+            var chunkLen = contentLength - read
+            if chunkLen > BufferSize:
+                chunkLen = BufferSize
+
+            request.client.rawRecv(readNow, chunkLen, MSG_DONTWAIT)
+            if readNow.len < 1:
+                if (errno != EAGAIN) and (errno != EWOULDBLOCK):
+                    raise newException(IOError, "Client socket disconnected!")
                 else:
-                    if (getTime() - noReadsStart) >= 2:
-                        # Timeout, probably gave us the wrong Content-Length.
-                        break
-        else:
-            noReadsStart = Time(0)
+                    if noReadsStart == Time(0):
+                        noReadsStart = getTime()
+                        continue
+                    else:
+                        if (getTime() - noReadsStart) >= 2:
+                            # Timeout, probably gave us the wrong Content-Length.
+                            break
+            else:
+                noReadsStart = Time(0)
 
-        read += readNow.len
+            read += readNow.len
 
-        lines.add(readNow)
+            lines.add(readNow)
 
-        var lineStart = 0
-        while lineStart < lines.len:
-            let lineEnd = lines.find("\n", lineStart) - "\n".len
+            var lineStart = 0
+            while lineStart < lines.len:
+                let lineEnd = lines.find("\n", lineStart) - "\n".len
 
-            if lineEnd < 0 or lineEnd >= lines.len:
-                break
+                if lineEnd < 0 or lineEnd >= lines.len:
+                    break
 
-            let lineNewSize = lineEnd - lineStart + 1
-            line.setLen(lineNewSize)
-            copyMem(addr(line[0]), addr(lines[lineStart]), lineNewSize)
+                let lineNewSize = lineEnd - lineStart + 1
+                line.setLen(lineNewSize)
+                copyMem(addr(line[0]), addr(lines[lineStart]), lineNewSize)
 
-            if line.len > 0:
-                when defined(logrequests):
-                    stdout.write("/write: ")
-                    stdout.writeLine(line)
+                if line.len > 0:
+                    when defined(logrequests):
+                        stdout.write("/write: ")
+                        stdout.writeLine(line)
 
-                line.lineProtocolToSQLEntryValues(entries, internedStrings)
+                    line.lineProtocolToSQLEntryValues(entries, internedStrings)
 
-            lineStart = lineEnd + "\n".len + 1
+                lineStart = lineEnd + "\n".len + 1
 
-        if lineStart < lines.len:
-            let linesNewSize = lines.len - lineStart
-            
-            moveMem(addr(lines[0]), addr(lines[lineStart]), linesNewSize)
-            lines.setLen(linesNewSize)
-        else:
-            lines.setLen(0)
+            if lineStart < lines.len:
+                let linesNewSize = lines.len - lineStart
+                
+                moveMem(addr(lines[0]), addr(lines[lineStart]), linesNewSize)
+                lines.setLen(linesNewSize)
+            else:
+                lines.setLen(0)
 
-    for pair in entries.pairs:
-        pair.sqlEntryValuesToSQL(sql)
+        for pair in entries.pairs:
+            pair.sqlEntryValuesToSQL(sql)
 
-        when defined(logrequests):
-            stdout.write("/write: ")
-            stdout.writeLine(sql)
+            when defined(logrequests):
+                stdout.write("/write: ")
+                stdout.writeLine(sql)
 
-        sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
-        sql.setLen(0)
+            sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
+            sql.setLen(0)
 
-    result = request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+        result = request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+    finally:
+        try:
+            line = nil
+            lines = nil
+            timeInterned = nil
+            readNow = nil
+            sql = nil
+
+            # Explicitly hint the garbage collector that it can collect these.
+            for entry in entries.values:
+                entry.entries.removeAll
+
+            entries = initTable[ref string, SQLEntryValues]()
+
+            internedStrings = initTable[string, ref string]()
+        finally:
+            GC_enable()
 
 template optionsCors(request: Request, allowMethods: string): Future[void] =
     request.respond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
