@@ -53,7 +53,7 @@ proc processConnection(socket: AsyncSocket, hostname: string, callback: proc (re
             await callback(request)
         else:
             if not socket.isClosed:
-                await socket.send("HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                await socket.send("HTTP/1.0 400 Bad Request\r\nExpires: Thu, 01 Jan 1970 00:00:01 GMT\r\nContent-Length: 0\r\n\r\n")
                 socket.close
 
 proc serve*(server: MicroAsyncHttpServer, port: Port, callback: proc (request: Request): Future[void] {.closure,gcsafe.},
