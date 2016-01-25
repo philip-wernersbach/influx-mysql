@@ -107,7 +107,12 @@ proc tryParseRequest*(request: string, httpMethod: var string, path: var string,
     let pathPointerAddr = addr(pathPointer)
     let pathLenAddr = addr(pathLen)
     let minorVersionAddr = addr(minorVersion)
-    let headersAddr = addr(headers[0])
+    
+    let headersAddr = if numberOfHeaders > 0:
+            addr(headers[0])
+        else:
+            nil
+
     let numberOfHeadersAddr = addr(numberOfHeaders)
 
     #var result = phr_parse_request(cstring(request), csize(requestLen), addr(methodPointer), addr(methodLen), addr(pathPointer), addr(pathLen),
