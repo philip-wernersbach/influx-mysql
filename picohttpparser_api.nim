@@ -88,8 +88,8 @@ type
 proc phr_decode_chunked*(decoder: ptr phr_chunked_decoder; buf: cstring; 
                          bufsz: ptr csize): ssize_t {.importc, header: "vendor/picohttpparser/picohttpparser.h".}
 
-proc parseRequest*(request: string, httpMethod: var string, path: var string, minor_version: var cint,
-                   headers: var seq[phr_header]) =
+proc tryParseRequest*(request: string, httpMethod: var string, path: var string, minor_version: var cint,
+                   headers: var seq[phr_header]): cint =
 
     var methodPointer: cstring
     var methodLen: csize
@@ -109,7 +109,6 @@ proc parseRequest*(request: string, httpMethod: var string, path: var string, mi
     let minorVersionAddr = addr(minorVersion)
     let headersAddr = addr(headers[0])
     let numberOfHeadersAddr = addr(numberOfHeaders)
-    var result: cint
 
     #var result = phr_parse_request(cstring(request), csize(requestLen), addr(methodPointer), addr(methodLen), addr(pathPointer), addr(pathLen),
     #                      addr(minorVersion), addr(headers[0]), addr(numberOfHeaders), previousHeaderBufferLen)
@@ -126,11 +125,21 @@ proc parseRequest*(request: string, httpMethod: var string, path: var string, mi
             headers.setLen(numberOfHeaders)
             return
         else:
-            raise newException(Exception, "picohttpparser: Request only partially consumed!")
+            result = -255
+
+proc parseRequest*(request: string, httpMethod: var string, path: var string, minor_version: var cint,
+                   headers: var seq[phr_header]) =
+
+    let result = request.tryParseRequest(httpMethod, path, minor_version, headers)
+
+    if (result >= 0):
+        return
     elif (result == -1):
         raise newException(Exception, "picohttpparser: Parse error!")
     elif (result == -2):
         raise newException(Exception, "picohttpparser: Incomplete request!")
+    elif (result == -255):
+        raise newException(Exception, "picohttpparser: Request only partially consumed!")
     else:
         raise newException(Exception, "picohttpparser: Unknown error! (Error code: " & $result & ")")
 
