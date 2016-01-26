@@ -2,6 +2,7 @@ import strutils
 import hashes as hashes
 import tables
 import strtabs
+import lists
 
 import reflists
 
@@ -40,15 +41,19 @@ proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
 template getToken*(entry: string, tokenEnd: char, start: int): string =
     entry.getToken({tokenEnd}, start)
 
-iterator tokens(entry: string, tokenEnd: char, start = 0): string =
+proc tokens(entry: string, tokensLen: var int, tokenEnd: char, start = 0): DoublyLinkedList[string] =
     let entryLen = entry.len
-
     var i = start
+
+    result = initDoublyLinkedList[string]()
+
+    tokensLen = 0
     while i < entryLen:
         let token = entry.getToken(tokenEnd, i)
-        yield token
+        result.append(token)
 
         i += token.len + 1
+        tokensLen += 1
 
 type
     InfluxValueType {.pure.} = enum
@@ -91,6 +96,11 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     let timeInterned = internedStrings["time"]
 
+    var keyAndTagsListLen: int
+    var fieldsListLen: int
+    let keyAndTagsList = keyAndTags.tokens(keyAndTagsListLen, ',', key.len + 1)
+    let fieldsList = fields.tokens(fieldsListLen, ',')
+
     var timestampSQL = newStringOfCap(timestamp.len + 14 + 29)
     timestampSQL.add("FROM_UNIXTIME(")
     timestampSQL.add(timestamp)
@@ -107,7 +117,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         result[keyInterned] = (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
                         entries: newSinglyLinkedRefList[Table[ref string, string]]())
 
-    var entryValues = newTable[ref string, string]()
+    var entryValues = newTable[ref string, string]((keyAndTagsListLen + fieldsListLen).rightSize)
     var order = result[keyInterned].order
     var entries = result[keyInterned].entries
 
@@ -115,7 +125,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     shallow(timestampSQL)
     entryValues[timeInterned] = timestampSQL
 
-    for tagAndValue in keyAndTags.tokens(',', key.len + 1):
+    for tagAndValue in keyAndTagsList.items:
         let tag = tagAndValue.getToken('=', 0)
         var value = tagAndValue[tag.len+1..tagAndValue.len-1]
 
@@ -132,7 +142,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         shallow(value)
         entryValues[tagInterned] = value
 
-    for nameAndValue in fields.tokens(','):
+    for nameAndValue in fieldsList.items:
         let name = nameAndValue.getToken('=', 0)
         var value = nameAndValue[name.len+1..nameAndValue.len-1]
 
