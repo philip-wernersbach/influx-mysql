@@ -733,6 +733,8 @@ proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
     new(context, destroyReadLinesFutureContext)
     context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result)
 
+    context.read = context.lines.len
+
     context.postReadLines
 
 proc mget[T](future: Future[T]): var T = asyncdispatch.mget(cast[FutureVar[T]](future))
