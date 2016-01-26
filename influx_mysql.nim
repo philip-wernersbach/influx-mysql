@@ -6,7 +6,7 @@ import strutils
 import asyncdispatch
 import asyncnet
 import asynchttpserver
-from net import BufferSize
+from net import BufferSize, TimeoutError
 import lists
 import hashes as hashes
 import tables
@@ -626,27 +626,41 @@ proc postWrite(request: Request) {.async.} =
         lines = request.client.recvWholeBuffer
 
         var read = 0
-        var noReadsStart: Time = Time(0)
+        var noReadsCount = 0
 
         while read < contentLength:
             var chunkLen = contentLength - read
             if chunkLen > BufferSize:
                 chunkLen = BufferSize
 
+            # Do a non-blocking read of data from the socket
             request.client.rawRecv(readNow, chunkLen, MSG_DONTWAIT)
             if readNow.len < 1:
+                # We didn't get data, check if client disconnected
                 if (errno != EAGAIN) and (errno != EWOULDBLOCK):
                     raise newException(IOError, "Client socket disconnected!")
                 else:
-                    if noReadsStart == Time(0):
-                        noReadsStart = getTime()
-                        continue
-                    else:
-                        if (getTime() - noReadsStart) >= 2:
-                            # Timeout, probably gave us the wrong Content-Length.
-                            break
+                    # Client didn't disconnect, it's just slow.
+                    # Start penalizing the client by responding to it slower.
+                    # This prevents slowing down other async connections because
+                    # of one slow client.
+                    noReadsCount += 1
+
+                    if noReadsCount > 40:
+                        # After 40 reads, we've waited a total of more than 15 seconds.
+                        # Timeout, probably gave us the wrong Content-Length.
+                        raise newException(TimeoutError, "Client is too slow in sending POST body! (Is Content-Length correct?)")
+
+                    # Client gets one freebie
+                    if noReadsCount > 1:
+                        # For every read with no data after the freebie, sleep for
+                        # an additional 20 milliseconds
+                        await sleepAsync((noReadsCount - 1) * 20)
+
+                    continue
             else:
-                noReadsStart = Time(0)
+                # We got data, reset the penalty
+                noReadsCount = 0
 
             read += readNow.len
 
