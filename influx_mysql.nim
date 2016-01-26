@@ -580,26 +580,171 @@ when defined(linux):
 else:
     const MSG_DONTWAIT = 0
 
-proc postWrite(request: Request) {.async.} =
-    var lines: string
-    var timeInterned: ref string
+type
+    ReadLinesFutureContext = ref tuple
+        contentLength: int
+        read: int
+        noReadsCount: int
+        readNow: string
+        line: string
+        lines: string
+        internedStrings: Table[string, ref string]
+        entries: Table[ref string, SQLEntryValues]
+        request: Request
+        retFuture: Future[ReadLinesFutureContext]
 
-    var line = ""
-    var sql = newStringOfCap(2097152)
-    var readNow = newString(BufferSize)
-    var internedStrings = initTable[string, ref string]()
+proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
+    # Manually hint the garbage collector that it can collect these.
+    for entry in context.entries.values:
+        entry.entries.removeAll
 
-    new(timeInterned)
-    timeInterned[] = "time"
+    context.entries = initTable[ref string, SQLEntryValues]()
+    context.internedStrings = initTable[string, ref string]()
 
-    internedStrings["time"] = timeInterned
+    context.lines = nil
+    context.line = nil
+    context.readNow = nil
 
-    var entries = initTable[ref string, SQLEntryValues]()
+    # Probably not needed, but better safe than sorry
+    if not context.retFuture.finished:
+        asyncCheck context.retFuture
+        context.retFuture.complete(nil)
 
+proc respondError(request: Request, e: ref Exception, eMsg: string) =
+    stderr.write(e.getStackTrace())
+    stderr.write("Error: unhandled exception: ")
+    stderr.writeLine(eMsg)
+
+    var errorResponseHeaders = JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS
+
+    if request.reqMethod != nil:
+        errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(request.reqMethod.toUpper)
+    else:
+        errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(nil)
+
+    asyncCheck request.respond(Http400, $( %*{ "error": eMsg } ), errorResponseHeaders)
+
+proc postReadLines(context: ReadLinesFutureContext) =
     try:
         GC_disable()
 
-        let params = getParams(request)
+        while context.read < context.contentLength:
+            var chunkLen = context.contentLength - context.read
+            if chunkLen > BufferSize:
+                chunkLen = BufferSize
+
+            # Do a non-blocking read of data from the socket
+            context.request.client.rawRecv(context.readNow, chunkLen, MSG_DONTWAIT)
+            if context.readNow.len < 1:
+                # We didn't get data, check if client disconnected
+                if (errno != EAGAIN) and (errno != EWOULDBLOCK):
+                    raise newException(IOError, "Client socket disconnected!")
+                else:
+                    # Client didn't disconnect, it's just slow.
+                    # Start penalizing the client by responding to it slower.
+                    # This prevents slowing down other async connections because
+                    # of one slow client.
+                    context.noReadsCount += 1
+
+                    if context.noReadsCount > 40:
+                        # After 40 reads, we've waited a total of more than 15 seconds.
+                        # Timeout, probably gave us the wrong Content-Length.
+                        raise newException(TimeoutError, "Client is too slow in sending POST body! (Is Content-Length correct?)")
+
+                    # Client gets one freebie
+                    if context.noReadsCount > 1:
+                        # For every read with no data after the freebie, sleep for
+                        # an additional 20 milliseconds
+                        let sleepFuture = sleepAsync((context.noReadsCount - 1) * 20)
+
+                        sleepFuture.callback = (proc(future: Future[void]) =
+                            context.postReadLines
+                        )
+
+                        GC_enable()
+                        return
+
+                    continue
+            else:
+                # We got data, reset the penalty
+                context.noReadsCount = 0
+
+            context.read += context.readNow.len
+
+            context.lines.add(context.readNow)
+
+            var lineStart = 0
+            while lineStart < context.lines.len:
+                let lineEnd = context.lines.find("\n", lineStart) - "\n".len
+
+                if lineEnd < 0 or lineEnd >= context.lines.len:
+                    break
+
+                let lineNewSize = lineEnd - lineStart + 1
+                context.line.setLen(lineNewSize)
+                copyMem(addr(context.line[0]), addr(context.lines[lineStart]), lineNewSize)
+
+                if context.line.len > 0:
+                    when defined(logrequests):
+                        stdout.write("/write: ")
+                        stdout.writeLine(context.line)
+
+                    context.line.lineProtocolToSQLEntryValues(context.entries, context.internedStrings)
+
+                lineStart = lineEnd + "\n".len + 1
+
+            if lineStart < context.lines.len:
+                let linesNewSize = context.lines.len - lineStart
+                
+                moveMem(addr(context.lines[0]), addr(context.lines[lineStart]), linesNewSize)
+                context.lines.setLen(linesNewSize)
+            else:
+                context.lines.setLen(0)
+
+        context.retFuture.complete(context)
+    except IOError, ValueError, TimeoutError:
+        context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
+
+        try:
+            context.destroyReadLinesFutureContext
+        finally:
+            GC_enable()
+
+proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
+    var contentLength = 0
+    result = newFuture[ReadLinesFutureContext]("postReadLines")
+
+    if request.headers.hasKey("Content-Length"):
+        contentLength = request.headers["Content-Length"].parseInt
+
+    if contentLength == 0:
+        result.fail(newException(IOError, "Content-Length required, but not provided!"))
+        #result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+        return
+
+    var timeInterned: ref string
+    new(timeInterned)
+    timeInterned[] = "time"
+
+    var internedStrings = initTable[string, ref string]()
+    internedStrings["time"] = timeInterned
+
+    var context: ReadLinesFutureContext
+    new(context, destroyReadLinesFutureContext)
+    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result)
+
+    context.postReadLines
+
+proc mget[T](future: Future[T]): var T = asyncdispatch.mget(cast[FutureVar[T]](future))
+
+proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
+    try:
+        GC_disable()
+
+        let context = ioResult.read
+        var sql = newStringOfCap(2097152)
+
+        let params = getParams(context.request)
 
         var dbName = ""
         var dbUsername = ""
@@ -614,87 +759,7 @@ proc postWrite(request: Request) {.async.} =
         if params.hasKey("p"):
             dbPassword = params["p"]
 
-        var contentLength = 0
-        
-        if request.headers.hasKey("Content-Length"):
-            contentLength = request.headers["Content-Length"].parseInt
-
-        if contentLength == 0:
-            result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
-            return
-
-        lines = request.client.recvWholeBuffer
-
-        var read = 0
-        var noReadsCount = 0
-
-        while read < contentLength:
-            var chunkLen = contentLength - read
-            if chunkLen > BufferSize:
-                chunkLen = BufferSize
-
-            # Do a non-blocking read of data from the socket
-            request.client.rawRecv(readNow, chunkLen, MSG_DONTWAIT)
-            if readNow.len < 1:
-                # We didn't get data, check if client disconnected
-                if (errno != EAGAIN) and (errno != EWOULDBLOCK):
-                    raise newException(IOError, "Client socket disconnected!")
-                else:
-                    # Client didn't disconnect, it's just slow.
-                    # Start penalizing the client by responding to it slower.
-                    # This prevents slowing down other async connections because
-                    # of one slow client.
-                    noReadsCount += 1
-
-                    if noReadsCount > 40:
-                        # After 40 reads, we've waited a total of more than 15 seconds.
-                        # Timeout, probably gave us the wrong Content-Length.
-                        raise newException(TimeoutError, "Client is too slow in sending POST body! (Is Content-Length correct?)")
-
-                    # Client gets one freebie
-                    if noReadsCount > 1:
-                        # For every read with no data after the freebie, sleep for
-                        # an additional 20 milliseconds
-                        await sleepAsync((noReadsCount - 1) * 20)
-
-                    continue
-            else:
-                # We got data, reset the penalty
-                noReadsCount = 0
-
-            read += readNow.len
-
-            lines.add(readNow)
-
-            var lineStart = 0
-            while lineStart < lines.len:
-                let lineEnd = lines.find("\n", lineStart) - "\n".len
-
-                if lineEnd < 0 or lineEnd >= lines.len:
-                    break
-
-                let lineNewSize = lineEnd - lineStart + 1
-                line.setLen(lineNewSize)
-                copyMem(addr(line[0]), addr(lines[lineStart]), lineNewSize)
-
-                if line.len > 0:
-                    when defined(logrequests):
-                        stdout.write("/write: ")
-                        stdout.writeLine(line)
-
-                    line.lineProtocolToSQLEntryValues(entries, internedStrings)
-
-                lineStart = lineEnd + "\n".len + 1
-
-            if lineStart < lines.len:
-                let linesNewSize = lines.len - lineStart
-                
-                moveMem(addr(lines[0]), addr(lines[lineStart]), linesNewSize)
-                lines.setLen(linesNewSize)
-            else:
-                lines.setLen(0)
-
-        for pair in entries.pairs:
+        for pair in context.entries.pairs:
             pair.sqlEntryValuesToSQL(sql)
 
             when defined(logrequests):
@@ -704,24 +769,25 @@ proc postWrite(request: Request) {.async.} =
             sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
             sql.setLen(0)
 
-        result = request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
-    finally:
+        asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+
         try:
-            line = nil
-            lines = nil
-            timeInterned = nil
-            readNow = nil
-            sql = nil
-
-            # Explicitly hint the garbage collector that it can collect these.
-            for entry in entries.values:
-                entry.entries.removeAll
-
-            entries = initTable[ref string, SQLEntryValues]()
-
-            internedStrings = initTable[string, ref string]()
+            context.destroyReadLinesFutureContext
         finally:
             GC_enable()
+    except IOError, ValueError, TimeoutError:
+        let context = ioResult.mget
+
+        context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
+
+        try:
+            context.destroyReadLinesFutureContext
+        finally:
+            GC_enable()
+
+template postWrite(request: Request) =
+    let ioResult = request.postReadLines
+    ioResult.callback = postWriteProcess
 
 template optionsCors(request: Request, allowMethods: string): Future[void] =
     request.respond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
@@ -741,7 +807,7 @@ proc router(request: Request) {.async.} =
             asyncCheck request.getQuery
             return
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
-            asyncCheck request.postWrite
+            request.postWrite
             return
         elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
             asyncCheck request.getOrHeadPing
@@ -765,20 +831,8 @@ proc router(request: Request) {.async.} =
         stdout.writeLine(responseMessage)
 
         asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod.toUpper))
-    except IOError, ValueError:
-        let e = getCurrentException()
-        stderr.write(e.getStackTrace())
-        stderr.write("Error: unhandled exception: ")
-        stderr.writeLine(getCurrentExceptionMsg())
-
-        var errorResponseHeaders = JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS
-
-        if request.reqMethod != nil:
-            errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(request.reqMethod.toUpper)
-        else:
-            errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(nil)
-
-        result = request.respond(Http400, $( %*{ "error": getCurrentExceptionMsg() } ), errorResponseHeaders)
+    except IOError, ValueError, TimeoutError:
+        request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
 proc quitUsage() =
     stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> <influxdb address:influxdb port> [cors allowed origin]")
