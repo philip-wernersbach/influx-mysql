@@ -591,7 +591,7 @@ type
         internedStrings: Table[string, ref string]
         entries: Table[ref string, SQLEntryValues]
         request: Request
-        retFuture: Future[ReadLinesFutureContext]
+        retFuture: pointer
 
 proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
     # Manually hint the garbage collector that it can collect these.
@@ -606,9 +606,9 @@ proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
     context.readNow = nil
 
     # Probably not needed, but better safe than sorry
-    if not context.retFuture.finished:
-        asyncCheck context.retFuture
-        context.retFuture.complete(nil)
+    if not cast[Future[ReadLinesFutureContext]](context.retFuture).finished:
+        asyncCheck cast[Future[ReadLinesFutureContext]](context.retFuture)
+        cast[Future[ReadLinesFutureContext]](context.retFuture).complete(nil)
 
 proc respondError(request: Request, e: ref Exception, eMsg: string) =
     stderr.write(e.getStackTrace())
@@ -701,7 +701,7 @@ proc postReadLines(context: ReadLinesFutureContext) =
             else:
                 context.lines.setLen(0)
 
-        context.retFuture.complete(context)
+        cast[Future[ReadLinesFutureContext]](context.retFuture).complete(context)
     except IOError, ValueError, TimeoutError:
         context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
@@ -731,7 +731,7 @@ proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
 
     var context: ReadLinesFutureContext
     new(context, destroyReadLinesFutureContext)
-    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result)
+    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: cast[pointer](result))
 
     context.read = context.lines.len
 
