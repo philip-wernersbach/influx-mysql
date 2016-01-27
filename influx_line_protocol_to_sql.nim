@@ -10,8 +10,8 @@ import reflists
 
 type
     SQLEntryValues* = tuple
-        order: OrderedTableRef[ref string, bool] not nil
-        entries: SinglyLinkedRefList[Table[ref string, string]] not nil
+        order: OrderedTableRef[ref string, int] not nil
+        entries: SinglyLinkedRefList[seq[string]] not nil
 
 template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
@@ -114,16 +114,21 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         internedStrings[key] = keyInterned
 
     if not result.hasKey(keyInterned):
-        result[keyInterned] = (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
-                        entries: newSinglyLinkedRefList[Table[ref string, string]]())
+        result[keyInterned] = (order: cast[OrderedTableRef[ref string, int] not nil](newOrderedTable[ref string, int]()), 
+                        entries: newSinglyLinkedRefList[seq[string]]())
 
-    var entryValues = newTable[ref string, string]((keyAndTagsListLen + fieldsListLen).rightSize)
-    var order = result[keyInterned].order
-    var entries = result[keyInterned].entries
+    let order = result[keyInterned].order
 
-    discard order.hasKeyOrPut(timeInterned, true)
+    # The length of the entry values seq is the total number of datapoints, if you will:
+    # <number of tags> + <number of fields> + <one for the timestamp>
+    let entryValuesLen = keyAndTagsListLen + fieldsListLen + 1
+
+    var entryValues: ref seq[string]
+    new(entryValues)
+    entryValues[] = newSeq[string](entryValuesLen)
+
     shallow(timestampSQL)
-    entryValues[timeInterned] = timestampSQL
+    entryValues[order.mgetOrPut(timeInterned, order.len)] = timestampSQL
 
     for tagAndValue in keyAndTagsList.items:
         let tag = tagAndValue.getToken('=', 0)
@@ -136,11 +141,9 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
             internedStrings[tag] = tagInterned
 
-        discard order.hasKeyOrPut(tagInterned, true)
-
         value = value.escape("'", "'")
         shallow(value)
-        entryValues[tagInterned] = value
+        entryValues[order.mgetOrPut(tagInterned, order.len)] = value
 
     for nameAndValue in fieldsList.items:
         let name = nameAndValue.getToken('=', 0)
@@ -153,35 +156,33 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
             internedStrings[name] = nameInterned
 
-        discard order.hasKeyOrPut(nameInterned, true)
-
         case value.valueType:
         of InfluxValueType.INTEGER:
             value = value[0..value.len-1]
             shallow(value)
 
-            entryValues[nameInterned] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
         of InfluxValueType.STRING:
             value = value.unescape.escape("'", "'")
             shallow(value)
 
-            entryValues[nameInterned] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
         of InfluxValueType.FLOAT:
             shallow(value)
 
-            entryValues[nameInterned] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
         of InfluxValueType.BOOLEAN_TRUE:
             value = "TRUE"
             shallow(value)
 
-            entryValues[nameInterned] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
         of InfluxValueType.BOOLEAN_FALSE:
             value = "FALSE"
             shallow(value)
             
-            entryValues[nameInterned] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
 
-    entries.append(entryValues)
+    result[keyInterned].entries.append(entryValues)
 
 proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string) =
     # Add header
@@ -211,15 +212,12 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
 
         result.add(" ( ")
         
-        var first2 = true
-        for columnName in kv.value.order.keys:
-            if not first2:
+        for columnPos in kv.value.order.values:
+            if columnPos > 0:
                 result.add(",")
-            else:
-                first2 = false
 
-            if entry.hasKey(columnName):
-                result.add(entry[columnName])
+            if entry[columnPos] != nil:
+                result.add(entry[columnPos])
             else:
                 result.add("NULL")
 
