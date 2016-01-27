@@ -660,8 +660,6 @@ proc postReadLines(context: ReadLinesFutureContext) =
                         sleepFuture.callback = (proc(future: Future[void]) =
                             context.postReadLines
                         )
-
-                        GC_enable()
                         return
 
                     continue
@@ -704,11 +702,9 @@ proc postReadLines(context: ReadLinesFutureContext) =
         cast[Future[ReadLinesFutureContext]](context.retFuture).complete(context)
     except IOError, ValueError, TimeoutError:
         context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
-
-        try:
-            context.destroyReadLinesFutureContext
-        finally:
-            GC_enable()
+        context.destroyReadLinesFutureContext
+    finally:
+        GC_enable()
 
 proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
     var contentLength = 0
@@ -773,18 +769,13 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
 
         asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 
-        try:
-            context.destroyReadLinesFutureContext
-        finally:
-            GC_enable()
+        context.destroyReadLinesFutureContext
     except IOError, ValueError, TimeoutError:
         let context = ioResult.mget
 
         context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
-
-        try:
-            context.destroyReadLinesFutureContext
-        finally:
+        context.destroyReadLinesFutureContext
+    finally:
             GC_enable()
 
 template postWrite(request: Request) =
