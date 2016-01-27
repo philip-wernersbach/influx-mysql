@@ -563,14 +563,10 @@ proc getQuery(request: Request): Future[void] =
             result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
     finally:
         try:
-            # Explicitly hint the garbage collector that it can collect these.
+            # SQLEntryValues.entries is a manually allocated object, so we
+            # need to free it.
             for entry in entries.items:
                 entry.data.entries.removeAll
-
-            entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
-
-            timeInterned = nil
-            internedStrings = initTable[string, ref string]()
         finally:
             GC_enable()
 
@@ -599,16 +595,10 @@ proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
     try:
         GC_disable()
 
-        # Manually hint the garbage collector that it can collect these.
+        # SQLEntryValues.entries is a manually allocated object, so we
+        # need to free it.
         for entry in context.entries.values:
             entry.entries.removeAll
-
-        context.internedStrings = initTable[string, ref string]()
-        context.entries = initTable[ref string, SQLEntryValues]()
-        
-        context.lines = nil
-        context.line = nil
-        context.readNow = nil
 
         # Probably not needed, but better safe than sorry
         if not context.retFuture.finished:
