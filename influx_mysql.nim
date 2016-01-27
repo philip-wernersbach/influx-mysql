@@ -596,21 +596,30 @@ type
         routerResult: Future[void]
 
 proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
-    # Manually hint the garbage collector that it can collect these.
-    for entry in context.entries.values:
-        entry.entries.removeAll
+    try:
+        GC_disable()
 
-    context.entries = initTable[ref string, SQLEntryValues]()
-    context.internedStrings = initTable[string, ref string]()
+        # Manually hint the garbage collector that it can collect these.
+        for entry in context.entries.values:
+            entry.entries.removeAll
 
-    context.lines = nil
-    context.line = nil
-    context.readNow = nil
+        context.internedStrings = initTable[string, ref string]()
+        context.entries = initTable[ref string, SQLEntryValues]()
+        
+        context.lines = nil
+        context.line = nil
+        context.readNow = nil
 
-    # Probably not needed, but better safe than sorry
-    if not context.retFuture.finished:
-        asyncCheck context.retFuture
-        context.retFuture.complete(nil)
+        # Probably not needed, but better safe than sorry
+        if not context.retFuture.finished:
+            asyncCheck context.retFuture
+            context.retFuture.complete(nil)
+
+        # Probably not needed, but better safe than sorry
+        if not context.routerResult.finished:
+            context.routerResult.complete
+    finally:
+        GC_enable()
 
 proc respondError(request: Request, e: ref Exception, eMsg: string) =
     stderr.write(e.getStackTrace())
