@@ -1,6 +1,7 @@
 {.boundChecks: on.}
 
 import macros
+import future
 import strtabs
 import strutils
 import asyncdispatch
@@ -460,7 +461,7 @@ proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string): StringTabl
     else:
         result = headers.withCorsIfNeeded(allowMethods, nil)
 
-proc getOrHeadPing(request: Request) {.async.} =
+proc getOrHeadPing(request: Request): Future[void] =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
     result = request.respond(Http204, "", PING_RESPONSE_HEADERS.withCorsIfNeeded(PING_HTTP_METHODS))
 
@@ -484,7 +485,7 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add("&p=")
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
-proc getQuery(request: Request) {.async.} =
+proc getQuery(request: Request): Future[void] =
     var internedStrings = initTable[string, ref string]()
 
     var timeInterned: ref string
@@ -592,6 +593,7 @@ type
         entries: Table[ref string, SQLEntryValues]
         request: Request
         retFuture: Future[ReadLinesFutureContext]
+        routerResult: Future[void]
 
 proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
     # Manually hint the garbage collector that it can collect these.
@@ -699,14 +701,17 @@ proc postReadLines(context: ReadLinesFutureContext) =
             else:
                 context.lines.setLen(0)
 
+        context.routerResult.complete
         context.retFuture.complete(context)
     except IOError, ValueError, TimeoutError:
+        context.routerResult.complete
+
         context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
         context.destroyReadLinesFutureContext
     finally:
         GC_enable()
 
-proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
+proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLinesFutureContext] =
     var contentLength = 0
     result = newFuture[ReadLinesFutureContext]("postReadLines")
 
@@ -727,7 +732,8 @@ proc postReadLines(request: Request): Future[ReadLinesFutureContext] =
 
     var context: ReadLinesFutureContext
     new(context, destroyReadLinesFutureContext)
-    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result)
+    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
+        internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result, routerResult: routerResult)
 
     context.read = context.lines.len
 
@@ -778,15 +784,23 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
     finally:
             GC_enable()
 
-template postWrite(request: Request) =
-    let ioResult = request.postReadLines
+template postWrite(request: Request, routerResult: Future[void]) =
+    let ioResult = request.postReadLines(routerResult)
     ioResult.callback = postWriteProcess
 
 template optionsCors(request: Request, allowMethods: string): Future[void] =
     request.respond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
 
-proc router(request: Request) {.async.} =
+proc routerHandleError(request: Request, processingResult: Future[void]) =
+    try:
+        processingResult.read
+    except IOError, ValueError, TimeoutError:
+        request.respondError(getCurrentException(), getCurrentExceptionMsg())
+
+proc router(request: Request): Future[void] =
     var request = request
+
+    result = newFuture[void]("router")
 
     try:
         request.basicAuthToUrlParam
@@ -797,34 +811,44 @@ proc router(request: Request) {.async.} =
             stdout.writeLine(request.url.query)
 
         if (request.reqMethod == "get") and (request.url.path == "/query"):
-            asyncCheck request.getQuery
+            result.complete
+            request.getQuery.callback = (x: Future[void]) => routerHandleError(request, x)
             return
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
-            request.postWrite
+            request.postWrite(result)
             return
         elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
-            asyncCheck request.getOrHeadPing
+            result.complete
+            request.getOrHeadPing.callback = (x: Future[void]) => routerHandleError(request, x)
             return
         elif (request.reqMethod == "options") and (corsAllowOrigin != nil):
+            result.complete
+
             case request.url.path:
             of "/query":
-                asyncCheck request.optionsCors(QUERY_HTTP_METHODS)
+                request.optionsCors(QUERY_HTTP_METHODS).callback = (x: Future[void]) => routerHandleError(request, x)
                 return
             of "/write":
-                asyncCheck request.optionsCors(WRITE_HTTP_METHODS)
+                request.optionsCors(WRITE_HTTP_METHODS).callback = (x: Future[void]) => routerHandleError(request, x)
                 return
             of "/ping":
-                asyncCheck request.optionsCors(PING_HTTP_METHODS)
+                request.optionsCors(PING_HTTP_METHODS).callback = (x: Future[void]) => routerHandleError(request, x)
                 return
             else:
                 discard
+
+        if not result.finished:
+            result.complete
 
         # Fall through on purpose, we didn't have a matching route.
         let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
         stdout.writeLine(responseMessage)
 
-        asyncCheck request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod.toUpper))
+        request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod.toUpper)).callback = (x: Future[void]) => routerHandleError(request, x)
     except IOError, ValueError, TimeoutError:
+        if not result.finished:
+            result.complete
+
         request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
 proc quitUsage() =
