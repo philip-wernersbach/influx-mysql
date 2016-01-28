@@ -107,6 +107,15 @@ else:
 const cacheControlDontCacheHeader = "private, max-age=" & cacheControlZeroAge & ", s-maxage=" & cacheControlZeroAge & ", no-cache"
 const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s-maxage=" & cachecontrolmaxage
 
+# sqlbuffersize sets the initial size of the SQL INSERT query buffer for POST /write commands.
+# The default size is MySQL's default max_allowed_packet value. Setting this to a higher size
+# will improve memory usage for INSERTs larger than the size, at the expense of overallocating
+# memory for INSERTs smaller than the size.
+when getEnv("sqlbuffersize") == "":
+    const SQL_BUFFER_SIZE = 2097152
+else:
+    const SQL_BUFFER_SIZE = getEnv("sqlbuffersize").parseInt
+
 var corsAllowOrigin: cstring = nil
 
 template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
@@ -745,7 +754,7 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
         GC_disable()
 
         let context = ioResult.read
-        var sql = newStringOfCap(2097152)
+        var sql = newStringOfCap(SQL_BUFFER_SIZE)
 
         let params = getParams(context.request)
 
