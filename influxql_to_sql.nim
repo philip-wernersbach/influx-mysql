@@ -67,6 +67,7 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
 proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
+    let lastValidPart = partsLen - 1
 
     if (partsLen >= 2):
         case parts[0]:
@@ -78,7 +79,7 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                 parts[1][3] = 'G'
 
             if partsLen >= 3:
-                for i in countUp(1, partsLen - 1):
+                for i in countUp(1, lastValidPart):
                     if parts[i] == "FROM":
                         let seriesPos = i + 1
 
@@ -86,11 +87,26 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                             parts[0] = "SELECT time,"
 
                         if (partsLen > seriesPos):
+                            let wherePartStart = seriesPos + 1
+
                             when defined(influxql_unquote_everything):
                                 if (parts[seriesPos][0] == '"') and (parts[seriesPos][parts[seriesPos].len - 1] == '"'):
                                     parts[seriesPos] = parts[seriesPos].unescape
 
                             series = parts[seriesPos]
+
+                            if partsLen > wherePartStart:
+                                for j in countUp(wherePartStart, lastValidPart):
+                                    if parts[j] == "WHERE":
+                                        let conditionsPartStart = j + 1
+
+                                        if partsLen > conditionsPartStart:
+                                            for k in countUp(conditionsPartStart, lastValidPart):
+                                                if (parts[k][0] == '{') and (parts[k][parts[k].len - 1] == '}'):
+                                                    parts[k][0] = '('
+                                                    parts[k][parts[k].len - 1] = ')'
+
+                                        break
 
                         when defined(influxql_unquote_everything):
                             for j in countDown(i - 1, 1):
@@ -105,7 +121,7 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
 
                                     parts[j] = newPart
 
-                        let lastPart = parts[partsLen - 1]
+                        let lastPart = parts[lastValidPart]
 
                         if (lastPart[lastPart.len - 1] == ')') and lastPart.startsWith("time(") and 
                             (parts[partsLen - 2] == "BY") and (parts[partsLen - 3] == "GROUP"):
@@ -118,28 +134,28 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                                 period = 0
 
                                 if intStr == "1":
-                                    parts[partsLen - 1] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
+                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
 
                             of 's':
                                 period = uint64(intStr.parseBiggestInt) * 1000
 
                                 if intStr == "1":
-                                    parts[partsLen - 1] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
+                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
                             of 'm':
                                 period = uint64(intStr.parseBiggestInt) * 60000
 
                                 if intStr == "1":
-                                    parts[partsLen - 1] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time)"
+                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time)"
                             of 'h':
                                 period = uint64(intStr.parseBiggestInt) * 3600000
 
                                 if intStr == "1":
-                                    parts[partsLen - 1] = "YEAR(time), MONTH(time), DAY(time), HOUR(time)"
+                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time)"
                             of 'd':
                                 period = uint64(intStr.parseBiggestInt) * 86400000
 
                                 if intStr == "1":
-                                    parts[partsLen - 1] = "YEAR(time), MONTH(time), DAY(time)"
+                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time)"
                             of 'w':
                                 period = uint64(intStr.parseBiggestInt) * 604800000
                             else:
@@ -169,7 +185,7 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
         else:
             discard
 
-    for i in countUp(0, partsLen - 1):
+    for i in countUp(0, lastValidPart):
         let part = parts[i]
 
         if part.len < 1:
