@@ -2,7 +2,6 @@ import strutils
 import hashes as hashes
 import tables
 import strtabs
-import lists
 
 import reflists
 
@@ -38,22 +37,52 @@ proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
 
     result = entry[start..entryLen-1]
 
+proc getTokenLen*(entry: string, tokenEnd: set[char], start: int): int =
+    let entryLen = entry.len
+
+    var escaped = false
+    var quoted = false
+    for i in countUp(start, entryLen - 1):
+        if not quoted:
+            if not escaped:
+                if entry[i] == '\\':
+                    escaped = true
+                elif entry[i] == '"':
+                    quoted = true
+                elif entry[i] in tokenEnd:
+                    result = i - start
+                    return
+            else:
+                escaped = false
+        elif entry[i] == '"':
+            quoted = false
+
+    result = entryLen - start
+
 template getToken*(entry: string, tokenEnd: char, start: int): string =
     entry.getToken({tokenEnd}, start)
 
-proc tokens(entry: string, tokensLen: var int, tokenEnd: char, start = 0): DoublyLinkedList[string] =
+template getTokenLen*(entry: string, tokenEnd: char, start: int): int =
+    entry.getTokenLen({tokenEnd}, start)
+
+proc tokens(entry: string, tokenEnd: char, start = 0): seq[string] =
     let entryLen = entry.len
     var i = start
-
-    result = initDoublyLinkedList[string]()
-
-    tokensLen = 0
+    var tokensLen = 0
+    
+    # Iterate once to find out how many tokens there are in the string
     while i < entryLen:
-        let token = entry.getToken(tokenEnd, i)
-        result.append(token)
-
-        i += token.len + 1
+        i += entry.getTokenLen(tokenEnd, i) + 1
         tokensLen += 1
+
+    i = start
+    result = newSeq[string](tokensLen)
+
+    # Iterate again to build the result.
+    for pos in countUp(0, tokensLen-1):
+        result[pos] = entry.getToken(tokenEnd, i)
+
+        i += result[pos].len + 1
 
 type
     InfluxValueType {.pure.} = enum
@@ -96,10 +125,10 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     let timeInterned = internedStrings["time"]
 
-    var keyAndTagsListLen: int
-    var fieldsListLen: int
-    let keyAndTagsList = keyAndTags.tokens(keyAndTagsListLen, ',', key.len + 1)
-    let fieldsList = fields.tokens(fieldsListLen, ',')
+    let keyAndTagsList = keyAndTags.tokens(',', key.len + 1)
+    let keyAndTagsListLen = keyAndTagsList.len
+    let fieldsList = fields.tokens(',')
+    let fieldsListLen = fieldsList.len
 
     var timestampSQL = newStringOfCap(timestamp.len + 14 + 29)
     timestampSQL.add("FROM_UNIXTIME(")
@@ -128,7 +157,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     entryValues[] = newSeq[string](entryValuesLen)
 
     shallow(timestampSQL)
-    entryValues[order.mgetOrPut(timeInterned, order.len)] = timestampSQL
+    entryValues[order.mgetOrPut(timeInterned, order.len)].shallowCopy(timestampSQL)
 
     for tagAndValue in keyAndTagsList.items:
         let tag = tagAndValue.getToken('=', 0)
@@ -143,7 +172,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
         value = value.escape("'", "'")
         shallow(value)
-        entryValues[order.mgetOrPut(tagInterned, order.len)] = value
+        entryValues[order.mgetOrPut(tagInterned, order.len)].shallowCopy(value)
 
     for nameAndValue in fieldsList.items:
         let name = nameAndValue.getToken('=', 0)
@@ -161,26 +190,26 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
             value = value[0..value.len-1]
             shallow(value)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
         of InfluxValueType.STRING:
             value = value.unescape.escape("'", "'")
             shallow(value)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
         of InfluxValueType.FLOAT:
             shallow(value)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
         of InfluxValueType.BOOLEAN_TRUE:
             value = "TRUE"
             shallow(value)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
         of InfluxValueType.BOOLEAN_FALSE:
             value = "FALSE"
             shallow(value)
             
-            entryValues[order.mgetOrPut(nameInterned, order.len)] = value
+            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
 
     result[keyInterned].entries.append(entryValues)
 
