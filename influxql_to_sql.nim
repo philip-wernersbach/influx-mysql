@@ -95,74 +95,83 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
 
                             series = parts[seriesPos]
 
-                            if partsLen > wherePartStart:
-                                for j in countUp(wherePartStart, lastValidPart):
-                                    if parts[j] == "WHERE":
-                                        let conditionsPartStart = j + 1
+                            for j in countUp(wherePartStart, lastValidPart):
+                                if parts[j] == "WHERE":
+                                    let conditionsPartStart = j + 1
 
-                                        if partsLen > conditionsPartStart:
-                                            for k in countUp(conditionsPartStart, lastValidPart):
-                                                if (parts[k][0] == '{') and (parts[k][parts[k].len - 1] == '}'):
-                                                    parts[k][0] = '('
-                                                    parts[k][parts[k].len - 1] = ')'
+                                    for k in countUp(conditionsPartStart, lastValidPart):
+                                        if (parts[k][0] == '{') and (parts[k][parts[k].len - 1] == '}'):
+                                            parts[k][0] = '('
+                                            parts[k][parts[k].len - 1] = ')'
 
+                                    break
+
+                            for j in countDown(lastValidPart, wherePartStart):
+                                if parts[j][parts[j].len - 1] == ')':
+                                    if parts[j].startsWith("time(") and (parts[j - 1] == "BY") and (parts[j - 2] == "GROUP"):
+                                        let intStr = parts[j][5..parts[j].len-3]
+                                        fillNull = true
+
+                                        case parts[j][parts[j].len-2]:
+                                        of 'u':
+                                            # Qt doesn't have microsecond precision.
+                                            period = 0
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
+
+                                        of 's':
+                                            period = uint64(intStr.parseBiggestInt) * 1000
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
+                                        of 'm':
+                                            period = uint64(intStr.parseBiggestInt) * 60000
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time)"
+                                        of 'h':
+                                            period = uint64(intStr.parseBiggestInt) * 3600000
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time)"
+                                        of 'd':
+                                            period = uint64(intStr.parseBiggestInt) * 86400000
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), MONTH(time), DAY(time)"
+                                        of 'w':
+                                            period = uint64(intStr.parseBiggestInt) * 604800000
+                                        else:
+                                            discard
+
+                                        let fillPart = j + 1
+                                        if partsLen > fillPart:
+                                            case parts[fillPart]:
+                                            of "fill(null)":
+                                                fillNull = true
+                                                parts[fillPart] = ""
+                                            of "fill(none)":
+                                                fillNull = false
+                                                parts[fillPart] = ""
+                                            else:
+                                                discard
+
+                                        parts.add("ORDER BY time ASC")
                                         break
 
-                        when defined(influxql_unquote_everything):
-                            for j in countDown(i - 1, 1):
-                                if (parts[j][parts[j].len - 1] == ')' and parts[j][parts[j].len - 2] == '"'):
-                                    let functionName = parts[j].getToken('(', 0)
-                                    var newPart = newStringOfCap(parts[j].len - 2)
+                                    when defined(influxql_unquote_everything):
+                                        if parts[j][parts[j].len - 2] == '"':
+                                            let functionName = parts[j].getToken('(', 0)
+                                            var newPart = newStringOfCap(parts[j].len - 2)
 
-                                    newPart.add(functionName)
-                                    newPart.add('(')
-                                    newPart.add(parts[j][functionName.len+2..parts[j].len-3])
-                                    newPart.add(")")
+                                            newPart.add(functionName)
+                                            newPart.add('(')
+                                            newPart.add(parts[j][functionName.len+2..parts[j].len-3])
+                                            newPart.add(")")
 
-                                    parts[j] = newPart
-
-                        let lastPart = parts[lastValidPart]
-
-                        if (lastPart[lastPart.len - 1] == ')') and lastPart.startsWith("time(") and 
-                            (parts[partsLen - 2] == "BY") and (parts[partsLen - 3] == "GROUP"):
-
-                            let intStr = lastPart[5..lastPart.len-3]
-
-                            case lastPart[lastPart.len-2]:
-                            of 'u':
-                                # Qt doesn't have microsecond precision.
-                                period = 0
-
-                                if intStr == "1":
-                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
-
-                            of 's':
-                                period = uint64(intStr.parseBiggestInt) * 1000
-
-                                if intStr == "1":
-                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
-                            of 'm':
-                                period = uint64(intStr.parseBiggestInt) * 60000
-
-                                if intStr == "1":
-                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time)"
-                            of 'h':
-                                period = uint64(intStr.parseBiggestInt) * 3600000
-
-                                if intStr == "1":
-                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time), HOUR(time)"
-                            of 'd':
-                                period = uint64(intStr.parseBiggestInt) * 86400000
-
-                                if intStr == "1":
-                                    parts[lastValidPart] = "YEAR(time), MONTH(time), DAY(time)"
-                            of 'w':
-                                period = uint64(intStr.parseBiggestInt) * 604800000
-                            else:
-                                discard
-
-                        parts.add("ORDER BY time ASC")
-                        break
+                                            parts[j] = newPart
+                            break
 
         of "DROP":
             if parts[1] == "SERIES":
@@ -194,28 +203,6 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
         case part:
         of "now()":
             parts[i] = "NOW(6)"
-        of "GROUP":
-            let potentialByPos = i + 1
-            let potentialFillStart = potentialByPos + 2
-
-            if (partsLen > potentialByPos) and (parts[potentialByPos] == "BY"):
-                fillNull = true
-
-                if partsLen > potentialFillStart:
-                    for j in countUp(potentialFillStart, partsLen - 1):
-                        case parts[j]:
-                        of "fill(null)":
-                            fillNull = true
-                            parts[j] = ""
-
-                            break
-                        of "fill(none)":
-                            fillNull = false
-                            parts[j] = ""
-
-                            break
-                        else:
-                            discard
         else:
             if (part[part.len - 1] == ')') and part.startsWith("time("):
                 let timeframeType = part[part.len-2]
