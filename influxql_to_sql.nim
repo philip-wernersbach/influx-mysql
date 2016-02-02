@@ -1,4 +1,5 @@
 import strutils
+import sets
 
 import influx_line_protocol_to_sql
 
@@ -64,7 +65,7 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
     if newPart.len > (intervalType.len + 10):
         parts[i] = newPart
 
-proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool): string =
+proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool, dizcard: var HashSet[string]): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
     let lastValidPart = partsLen - 1
@@ -107,12 +108,14 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                                     break
 
                             for j in countDown(lastValidPart, wherePartStart):
-                                if parts[j][parts[j].len - 1] == ')':
+                                let jPartLen = parts[j].len
+
+                                if parts[j][jPartLen - 1] == ')':
                                     if parts[j].startsWith("time(") and (parts[j - 1] == "BY") and (parts[j - 2] == "GROUP"):
-                                        let intStr = parts[j][5..parts[j].len-3]
+                                        let intStr = parts[j][5..jPartLen-3]
                                         fillNull = true
 
-                                        case parts[j][parts[j].len-2]:
+                                        case parts[j][jPartLen-2]:
                                         of 'u':
                                             # Qt doesn't have microsecond precision.
                                             period = 0
@@ -158,16 +161,19 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                                                 discard
 
                                         parts.add("ORDER BY time ASC")
-                                        break
+
+                                    elif parts[j].startsWith("discard("):
+                                        dizcard.incl(parts[j][8..jPartLen-2])
+                                        parts[j] = ""
 
                                     when defined(influxql_unquote_everything):
-                                        if parts[j][parts[j].len - 2] == '"':
+                                        if parts[j][jPartLen - 2] == '"':
                                             let functionName = parts[j].getToken('(', 0)
-                                            var newPart = newStringOfCap(parts[j].len - 2)
+                                            var newPart = newStringOfCap(jPartLen - 2)
 
                                             newPart.add(functionName)
                                             newPart.add('(')
-                                            newPart.add(parts[j][functionName.len+2..parts[j].len-3])
+                                            newPart.add(parts[j][functionName.len+2..jPartLen-3])
                                             newPart.add(")")
 
                                             parts[j] = newPart

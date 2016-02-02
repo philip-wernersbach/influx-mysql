@@ -18,6 +18,7 @@ import base64
 import cgi
 import times
 import os
+import sets
 
 import qt5_qtsql
 
@@ -332,7 +333,7 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
             entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
     useDB(dbName, dbUsername, dbPassword):
         block:
@@ -375,28 +376,29 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
                 var fieldNameConst = record.fieldName(i).toUtf8.constData.umc
                 var fieldName: string = fieldNameConst.strdup
 
-                # For strict InfluxDB compatibilty:
-                #
-                # We only return the name of the functions as the field, and not the name and the arguments.
-                #
-                # We also change "AVG" to "mean" since we change "mean" to "AVG" in the InfluxQL to SQL conversion.
-                if fieldName[fieldName.len-1] == ')':
-                    fieldName = fieldName.getToken('(', 0)
+                if (not dizcard.contains(fieldName)):
+                    # For strict InfluxDB compatibilty:
+                    #
+                    # We only return the name of the functions as the field, and not the name and the arguments.
+                    #
+                    # We also change "AVG" to "mean" since we change "mean" to "AVG" in the InfluxQL to SQL conversion.
+                    if fieldName[fieldName.len-1] == ')':
+                        fieldName = fieldName.getToken('(', 0)
 
-                    if fieldName == "AVG":
-                        fieldName = "mean"
+                        if fieldName == "AVG":
+                            fieldName = "mean"
 
-                var value = record.toJSONField(i, epoch)
+                    var value = record.toJSONField(i, epoch)
 
-                var fieldNameInterned = internedStrings.getOrDefault(fieldName)
-                if fieldnameInterned == nil:
-                    new(fieldNameInterned)
-                    fieldNameInterned[] = fieldName
+                    var fieldNameInterned = internedStrings.getOrDefault(fieldName)
+                    if fieldnameInterned == nil:
+                        new(fieldNameInterned)
+                        fieldNameInterned[] = fieldName
 
-                    internedStrings[fieldName] = fieldNameInterned
+                        internedStrings[fieldName] = fieldNameInterned
 
-                discard order.hasKeyOrPut(fieldNameInterned, true)
-                entryValues[fieldNameInterned] = value
+                    discard order.hasKeyOrPut(fieldNameInterned, true)
+                    entryValues[fieldNameInterned] = value
 
             entries.append(entryValues)
 
@@ -548,8 +550,9 @@ proc getQuery(request: Request): Future[void] =
             var series: string
             var period = uint64(0)
             var fillNull = false
+            var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(series, period, fillNull, cache)
+            let sql = line.influxQlToSql(series, period, fillNull, cache, dizcard)
             
             when defined(logrequests):
                 stdout.write("/query: ")
@@ -558,7 +561,7 @@ proc getQuery(request: Request): Future[void] =
                 stdout.writeLine(sql)
 
             try:
-                sql.runDBQueryAndUnpack(series, period, fillNull, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+                sql.runDBQueryAndUnpack(series, period, fillNull, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
             except DBQueryException:
                 stdout.write("/query: ")
                 stdout.write(line)
