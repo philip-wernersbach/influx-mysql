@@ -214,8 +214,8 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                 let timeframeType = part[part.len-2]
                 let timeframeNumber = part[5..part.len-3]
                 
-                parts[i] = newStringOfCap(25 + timeframeNumber.len)
-                parts[i].add("time DIV ( ")
+                parts[i] = newStringOfCap(41 + timeframeNumber.len)
+                parts[i].add("UNIX_TIMESTAMP(time) DIV ( ")
                 parts[i].add(timeframeNumber)
 
                 case timeframeType:
