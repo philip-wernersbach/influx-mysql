@@ -11,8 +11,6 @@ from net import BufferSize, TimeoutError
 import lists
 import hashes as hashes
 import tables
-import strtabs
-import marshal
 import json
 import base64
 import cgi
