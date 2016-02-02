@@ -145,6 +145,9 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time)"
                                         of 'w':
                                             period = uint64(intStr.parseBiggestInt) * 604800000
+
+                                            if intStr == "1":
+                                                parts[j] = "YEAR(time), WEEK(time)"
                                         else:
                                             discard
 
