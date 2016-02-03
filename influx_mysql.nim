@@ -24,7 +24,7 @@ import reflists
 import microasynchttpserver
 import qsqldatabase
 import qvariant
-import qtimezone
+import qttimespec
 import qdatetime
 import qsqlrecord
 import influxql_to_sql
@@ -233,31 +233,28 @@ proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
     result.kind = JSONFieldKind.String
     result.stringVal = timeStringConst.strdup
 
-proc toJSONField(msSinceEpoch: uint64, epoch: EpochFormat): JSONField =
+proc toJSONField(dateTime: QDateTimeObj, epoch: EpochFormat): JSONField =
     case epoch:
     of EpochFormat.RFC3339:
-        var dateTime = newQDateTimeObj(qint64(msSinceEpoch))
-        dateTime.setTimeZone(qTimeZoneUtc())
-
         result = dateTime.toRFC3339JSONField
     of EpochFormat.Hour:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch div 3600000
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 3600000
     of EpochFormat.Minute:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch div 60000
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 60000
     of EpochFormat.Second:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch div 1000
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 1000
     of EpochFormat.Millisecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch)
     of EpochFormat.Microsecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch * 1000
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) * 1000
     of EpochFormat.Nanosecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = msSinceEpoch * 1000000
+        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) * 1000000
 
 proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField =
     if not record.isNull(i):
@@ -266,13 +263,9 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
         case QVariantType(valueVariant.userType):
         of QVariantType.Date, QVariantType.Time, QVariantType.DateTime:
             var dateTime = valueVariant.toQDateTimeObj
-            dateTime.setTimeZone(qTimeZoneUtc())
+            dateTime.setTimeSpec(QtUtc)
 
-            case epoch:
-            of EpochFormat.RFC3339:
-                result = dateTime.toRFC3339JSONField
-            else:
-                result = uint64(dateTime.toMSecsSinceEpoch).toJSONField(epoch)
+            result = dateTime.toJSONField(epoch)
 
         of QVariantType.Bool:
 
@@ -327,7 +320,7 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
                 if fieldName != timeInterned:
                     entryValues[fieldName] = JSONField(kind: JSONFieldKind.Null)
                 else:
-                    entryValues[timeInterned] = lastTime.toJSONField(epoch)
+                    entryValues[timeInterned] = newQDateTimeObj(qint64(lastTime), QtUtc).toJSONField(epoch)
 
             entries.append(entryValues)
 
