@@ -26,3 +26,6 @@ proc toQStringObj*(dateTime: QDateTimeObj, format: cstring): QStringObj {.header
 proc toMSecsSinceEpoch*(dateTime: QDateTimeObj): qint64 {.header: QDATETIME_H, importcpp: "toMSecsSinceEpoch".}
 
 proc setTimeZone*(dateTime: QDateTimeObj, toZone: QTimeZoneObj) {.header: QDATETIME_H, importcpp: "setTimeZone".}
+proc addMSecs*(a: var QDateTimeObj, b: qint64): QDateTimeObj {.header: QDATETIME_H, importcpp: "addMSecs".}
+
+proc `<`*(a: QDateTimeObj, b: QDateTimeObj): bool {.header: QDATETIME_H, importcpp: "(# < #)".}

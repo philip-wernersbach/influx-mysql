@@ -303,16 +303,27 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
         result.kind = JSONFieldKind.Null
 
 proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
-                lastTime: uint64, newTime: uint64, period: uint64, epoch: EpochFormat, internedStrings: var Table[string, ref string]) =
+                lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, internedStrings: var Table[string, ref string]) =
 
     var lastTime = lastTime
+    let epochResolution = case epoch:
+        of EpochFormat.Hour:
+            uint64(3600000)
+        of EpochFormat.Minute:
+            uint64(60000)
+        of EpochFormat.Second:
+            uint64(1000)
+        else:
+            uint64(1)
+
     let timeInterned = internedStrings["time"]
 
-    if ((newTime - lastTime) div period) > uint64(1):
+    if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 1:
         while true:
-            lastTime += period
+            lastTime = lastTime.addMSecs(qint64(period))
 
-            if lastTime >= newTime:
+            if (newTime < lastTime) or
+                ((uint64(newTime.toMSecsSinceEpoch) div epochResolution) - (uint64(lastTime.toMSecsSinceEpoch) div epochResolution) < 1):
                 break
 
             var entryValues = newTable[ref string, JSONField]()
@@ -320,12 +331,14 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
                 if fieldName != timeInterned:
                     entryValues[fieldName] = JSONField(kind: JSONFieldKind.Null)
                 else:
-                    entryValues[timeInterned] = newQDateTimeObj(qint64(lastTime), QtUtc).toJSONField(epoch)
+                    entryValues[timeInterned] = lastTime.toJSONField(epoch)
 
             entries.append(entryValues)
 
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
+    var zeroDateTime = newQDateTimeObj(0, QtUtc)
+
     useDB(dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='UTC'".useQuery(database)
@@ -339,8 +352,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
 
         var order = seriesAndData.data.order
 
-        var lastTime = uint64(0)
-        var first = true
+        var lastTime = zeroDateTime
 
         while query.next() == true:
             var record = query.record
@@ -354,12 +366,11 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
                 # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
                 # SQL databases do not do this, they return nothing if there is no data. So we need to add these
                 # NULLs.
-                var newTime = uint64(record.value("time").toMSecsSinceEpoch)
+                var newTime: QDateTimeObj = record.value("time")
+                newTime.setTimeSpec(QtUtc)
 
-                if (period > uint64(0)) and not first:
+                if (period > uint64(0)) and (zeroDateTime < lastTime):
                     entries.addNulls(order, lastTime, newTime, period, epoch, internedStrings)
-                else:
-                    first = false
 
                 lastTime = newTime
 
