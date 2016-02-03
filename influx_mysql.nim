@@ -639,48 +639,48 @@ proc postReadLines(context: ReadLinesFutureContext) =
     try:
         GC_disable()
 
-        while context.read < context.contentLength:
-            var chunkLen = context.contentLength - context.read
-            if chunkLen > BufferSize:
-                chunkLen = BufferSize
+        var chunkLen = context.contentLength - context.read
+        while true:
+            if chunkLen > 0:
+                if chunkLen > BufferSize:
+                    chunkLen = BufferSize
 
-            # Do a non-blocking read of data from the socket
-            context.request.client.rawRecv(context.readNow, chunkLen, MSG_DONTWAIT)
-            if context.readNow.len < 1:
-                # We didn't get data, check if client disconnected
-                if (errno != EAGAIN) and (errno != EWOULDBLOCK):
-                    raise newException(IOError, "Client socket disconnected!")
+                # Do a non-blocking read of data from the socket
+                context.request.client.rawRecv(context.readNow, chunkLen, MSG_DONTWAIT)
+                if context.readNow.len < 1:
+                    # We didn't get data, check if client disconnected
+                    if (errno != EAGAIN) and (errno != EWOULDBLOCK):
+                        raise newException(IOError, "Client socket disconnected!")
+                    else:
+                        # Client didn't disconnect, it's just slow.
+                        # Start penalizing the client by responding to it slower.
+                        # This prevents slowing down other async connections because
+                        # of one slow client.
+                        context.noReadsCount += 1
+
+                        if context.noReadsCount > 40:
+                            # After 40 reads, we've waited a total of more than 15 seconds.
+                            # Timeout, probably gave us the wrong Content-Length.
+                            raise newException(TimeoutError, "Client is too slow in sending POST body! (Is Content-Length correct?)")
+
+                        # Client gets one freebie
+                        if context.noReadsCount > 1:
+                            # For every read with no data after the freebie, sleep for
+                            # an additional 20 milliseconds
+                            let sleepFuture = sleepAsync((context.noReadsCount - 1) * 20)
+
+                            sleepFuture.callback = (proc(future: Future[void]) =
+                                context.postReadLines
+                            )
+                            return
+
+                        continue
                 else:
-                    # Client didn't disconnect, it's just slow.
-                    # Start penalizing the client by responding to it slower.
-                    # This prevents slowing down other async connections because
-                    # of one slow client.
-                    context.noReadsCount += 1
+                    # We got data, reset the penalty
+                    context.noReadsCount = 0
 
-                    if context.noReadsCount > 40:
-                        # After 40 reads, we've waited a total of more than 15 seconds.
-                        # Timeout, probably gave us the wrong Content-Length.
-                        raise newException(TimeoutError, "Client is too slow in sending POST body! (Is Content-Length correct?)")
-
-                    # Client gets one freebie
-                    if context.noReadsCount > 1:
-                        # For every read with no data after the freebie, sleep for
-                        # an additional 20 milliseconds
-                        let sleepFuture = sleepAsync((context.noReadsCount - 1) * 20)
-
-                        sleepFuture.callback = (proc(future: Future[void]) =
-                            context.postReadLines
-                        )
-                        return
-
-                    continue
-            else:
-                # We got data, reset the penalty
-                context.noReadsCount = 0
-
-            context.read += context.readNow.len
-
-            context.lines.add(context.readNow)
+                context.read += context.readNow.len
+                context.lines.add(context.readNow)
 
             var lineStart = 0
             while lineStart < context.lines.len:
@@ -709,6 +709,11 @@ proc postReadLines(context: ReadLinesFutureContext) =
                 context.lines.setLen(linesNewSize)
             else:
                 context.lines.setLen(0)
+
+            chunkLen = context.contentLength - context.read
+
+            if chunkLen <= 0:
+                break
 
         context.routerResult.complete
         context.retFuture.complete(context)
