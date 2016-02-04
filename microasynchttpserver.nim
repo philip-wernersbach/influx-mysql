@@ -32,6 +32,9 @@ proc processConnection(socket: AsyncSocket, hostname: string, callback: proc (re
             let line = await socket.recvLine
 
             if line == "":
+                if not socket.isClosed:
+                    socket.close
+
                 return
 
             if not (((line.len == 1) and (line[0] == char(0x0a))) or ((line.len == 2) and (line[0] == char(0x0d)) and (line[1] == char(0x0a)))):
