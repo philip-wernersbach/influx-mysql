@@ -19,6 +19,7 @@ import os
 import sets
 
 import qt5_qtsql
+import snappy as snappy
 
 import reflists
 import microasynchttpserver
@@ -596,6 +597,7 @@ type
         contentLength: int
         read: int
         noReadsCount: int
+        compressed: bool
         readNow: string
         line: string
         lines: string
@@ -686,35 +688,40 @@ proc postReadLines(context: ReadLinesFutureContext) =
                 context.read += context.readNow.len
                 context.lines.add(context.readNow)
 
-            var lineStart = 0
-            while lineStart < context.lines.len:
-                let lineEnd = context.lines.find("\n", lineStart) - "\n".len
-
-                if lineEnd < 0 or lineEnd >= context.lines.len:
-                    break
-
-                let lineNewSize = lineEnd - lineStart + 1
-                context.line.setLen(lineNewSize)
-                copyMem(addr(context.line[0]), addr(context.lines[lineStart]), lineNewSize)
-
-                if context.line.len > 0:
-                    when defined(logrequests):
-                        stdout.write("/write: ")
-                        stdout.writeLine(context.line)
-
-                    context.line.lineProtocolToSQLEntryValues(context.entries, context.internedStrings)
-
-                lineStart = lineEnd + "\n".len + 1
-
-            if lineStart < context.lines.len:
-                let linesNewSize = context.lines.len - lineStart
-                
-                moveMem(addr(context.lines[0]), addr(context.lines[lineStart]), linesNewSize)
-                context.lines.setLen(linesNewSize)
-            else:
-                context.lines.setLen(0)
-
             chunkLen = context.contentLength - context.read
+
+            if (not context.compressed) or (chunkLen <= 0):
+                var lineStart = 0
+
+                if context.compressed:
+                    context.lines = snappy.uncompress(context.lines)
+
+                while lineStart < context.lines.len:
+                    let lineEnd = context.lines.find("\n", lineStart) - "\n".len
+
+                    if lineEnd < 0 or lineEnd >= context.lines.len:
+                        break
+
+                    let lineNewSize = lineEnd - lineStart + 1
+                    context.line.setLen(lineNewSize)
+                    copyMem(addr(context.line[0]), addr(context.lines[lineStart]), lineNewSize)
+
+                    if context.line.len > 0:
+                        when defined(logrequests):
+                            stdout.write("/write: ")
+                            stdout.writeLine(context.line)
+
+                        context.line.lineProtocolToSQLEntryValues(context.entries, context.internedStrings)
+
+                    lineStart = lineEnd + "\n".len + 1
+
+                if lineStart < context.lines.len:
+                    let linesNewSize = context.lines.len - lineStart
+                    
+                    moveMem(addr(context.lines[0]), addr(context.lines[lineStart]), linesNewSize)
+                    context.lines.setLen(linesNewSize)
+                else:
+                    context.lines.setLen(0)
 
             if chunkLen <= 0:
                 break
@@ -731,15 +738,28 @@ proc postReadLines(context: ReadLinesFutureContext) =
 
 proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLinesFutureContext] =
     var contentLength = 0
+    var compressed = false
+    var contentEncoding: string = nil
+
     result = newFuture[ReadLinesFutureContext]("postReadLines")
 
     if request.headers.hasKey("Content-Length"):
         contentLength = request.headers["Content-Length"].parseInt
 
+    if request.headers.hasKey("Content-Encoding"):
+        contentEncoding = request.headers["Content-Encoding"]
+
     if contentLength == 0:
         result.fail(newException(IOError, "Content-Length required, but not provided!"))
         #result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
         return
+
+    if contentEncoding != nil:
+        if contentEncoding == "snappy":
+            compressed = true
+        else:
+            result.fail(newException(IOError, "Content-Encoding \"" & contentEncoding & "\" not supported!"))
+            return
 
     var timeInterned: ref string
     new(timeInterned)
@@ -750,7 +770,7 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     var context: ReadLinesFutureContext
     new(context, destroyReadLinesFutureContext)
-    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
+    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, compressed: compressed, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
         internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result, routerResult: routerResult)
 
     context.read = context.lines.len
