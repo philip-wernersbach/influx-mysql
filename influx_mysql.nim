@@ -598,6 +598,7 @@ type
         read: int
         noReadsCount: int
         compressed: bool
+        destroyed: bool
         readNow: string
         line: string
         lines: string
@@ -607,25 +608,28 @@ type
         retFuture: Future[ReadLinesFutureContext]
         routerResult: Future[void]
 
-proc destroyReadLinesFutureContext(context: ReadLinesFutureContext) =
-    try:
-        GC_disable()
+proc destroyReadLinesFutureContext(context: ReadLinesFutureContext not nil) =
+    if not context.destroyed:
+        try:
+            GC_disable()
 
-        # SQLEntryValues.entries is a manually allocated object, so we
-        # need to free it.
-        for entry in context.entries.values:
-            entry.entries.removeAll
+            # SQLEntryValues.entries is a manually allocated object, so we
+            # need to free it.
+            for entry in context.entries.values:
+                entry.entries.removeAll
 
-        # Probably not needed, but better safe than sorry
-        if not context.retFuture.finished:
-            asyncCheck context.retFuture
-            context.retFuture.complete(nil)
+            # Probably not needed, but better safe than sorry
+            if not context.retFuture.finished:
+                asyncCheck context.retFuture
+                context.retFuture.complete(nil)
 
-        # Probably not needed, but better safe than sorry
-        if not context.routerResult.finished:
-            context.routerResult.complete
-    finally:
-        GC_enable()
+            # Probably not needed, but better safe than sorry
+            if not context.routerResult.finished:
+                context.routerResult.complete
+
+            context.destroyed = true
+        finally:
+            GC_enable()
 
 proc respondError(request: Request, e: ref Exception, eMsg: string) =
     stderr.write(e.getStackTrace())
@@ -641,7 +645,7 @@ proc respondError(request: Request, e: ref Exception, eMsg: string) =
 
     asyncCheck request.respond(Http400, $( %*{ "error": eMsg } ), errorResponseHeaders)
 
-proc postReadLines(context: ReadLinesFutureContext) =
+proc postReadLines(context: ReadLinesFutureContext not nil) =
     try:
         GC_disable()
 
@@ -768,9 +772,9 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
     var internedStrings = initTable[string, ref string]()
     internedStrings["time"] = timeInterned
 
-    var context: ReadLinesFutureContext
+    var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, compressed: compressed, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
+    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, compressed: compressed, destroyed: false, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
         internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result, routerResult: routerResult)
 
     context.read = context.lines.len
@@ -783,42 +787,48 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
     try:
         GC_disable()
 
-        let context = ioResult.read
-        var sql = newStringOfCap(SQL_BUFFER_SIZE)
-
-        let params = getParams(context.request)
-
         var dbName = ""
         var dbUsername = ""
         var dbPassword = ""
+        var sql = newStringOfCap(SQL_BUFFER_SIZE)
 
-        if params.hasKey("db"):
-            dbName = params["db"]
+        let context = ioResult.read
 
-        if params.hasKey("u"):
-            dbUsername = params["u"]
+        let params = getParams(context.request)
 
-        if params.hasKey("p"):
-            dbPassword = params["p"]
+        if context != nil:
+            if params.hasKey("db"):
+                dbName = params["db"]
 
-        for pair in context.entries.pairs:
-            pair.sqlEntryValuesToSQL(sql)
+            if params.hasKey("u"):
+                dbUsername = params["u"]
 
-            when defined(logrequests):
-                stdout.write("/write: ")
-                stdout.writeLine(sql)
+            if params.hasKey("p"):
+                dbPassword = params["p"]
 
-            sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
-            sql.setLen(0)
+            for pair in context.entries.pairs:
+                pair.sqlEntryValuesToSQL(sql)
 
-        asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+                when defined(logrequests):
+                    stdout.write("/write: ")
+                    stdout.writeLine(sql)
 
-        context.destroyReadLinesFutureContext
+                sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
+                sql.setLen(0)
+
+            asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+
+            context.destroyReadLinesFutureContext
+        else:
+            raise newException(Exception, "Context is nil! (This cannot happen under regular runtime.)")
     except IOError, ValueError, TimeoutError:
         let context = ioResult.mget
 
-        context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
-        context.destroyReadLinesFutureContext
+        if context != nil:
+            context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
+            context.destroyReadLinesFutureContext
+        else:
+            raise newException(Exception, "Context is nil! (This cannot happen under regular runtime.)")
     finally:
             GC_enable()
 
