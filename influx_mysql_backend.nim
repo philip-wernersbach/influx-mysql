@@ -6,6 +6,7 @@ import os
 import qt5_qtsql
 
 import stdlib_extra
+import reflists
 import qsqldatabase
 import influx_line_protocol_to_sql
 
@@ -91,7 +92,7 @@ template useQuery*(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
     var query = database.qSqlQuery()
     sql.useQuery(query)
 
-proc runDBQueryWithTransaction(sql: cstring, dbName: string, dbUsername: string, dbPassword: string) =
+proc runDBQueryWithTransaction(sql: cstring, dbName: cstring, dbUsername: cstring, dbPassword: cstring) =
     useDB(dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='UTC'".useQuery(database)
@@ -133,7 +134,7 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
     else:
         context.lines.setLen(0)
 
-proc processSQLEntryValuesAndRunDBQuery*(context: var ReadLinesContext, dbName: string, dbUsername: string, dbPassword: string) {.inline.} =
+proc processSQLEntryValuesAndRunDBQuery*(context: var ReadLinesContext, dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
     var sql = newStringOfCap(SQL_BUFFER_SIZE)
 
     for pair in context.entries.pairs:
@@ -145,6 +146,25 @@ proc processSQLEntryValuesAndRunDBQuery*(context: var ReadLinesContext, dbName: 
 
         sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
+
+proc newReadLinesContext*(compressed: bool, lines: string): ReadLinesContext {.inline.} =
+    var timeInterned: ref string
+    new(timeInterned)
+    timeInterned[] = "time"
+
+    var internedStrings = initTable[string, ref string]()
+    internedStrings["time"] = timeInterned
+
+    (compressed: compressed, destroyed: false, line: "", lines: lines, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]())
+
+proc destroyReadLinesContext*(context: var ReadLinesContext) {.inline.} =
+    if not context.destroyed:
+        # SQLEntryValues.entries is a manually allocated object, so we
+        # need to free it.
+        for entry in context.entries.values:
+            entry.entries.removeAll
+
+        context.destroyed = true
 
 template uncompressOverwrite*(context: var ReadLinesContext) =
     if context.compressed:

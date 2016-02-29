@@ -30,6 +30,7 @@ import qsqlrecord
 import influxql_to_sql
 import influx_line_protocol_to_sql
 import influx_mysql_backend
+import influx_mysql_cmdline
 
 type
     URLParameterError = object of ValueError
@@ -511,10 +512,8 @@ proc destroyReadLinesFutureContext(context: ReadLinesFutureContext not nil) =
         try:
             GC_disable()
 
-            # SQLEntryValues.entries is a manually allocated object, so we
-            # need to free it.
-            for entry in context.super.entries.values:
-                entry.entries.removeAll
+            context.super.destroyReadLinesContext
+            context.super.destroyed = false
 
             # Probably not needed, but better safe than sorry
             if not context.retFuture.finished:
@@ -634,16 +633,9 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
             result.fail(newException(IOError, "Content-Encoding \"" & contentEncoding & "\" not supported!"))
             return
 
-    var timeInterned: ref string
-    new(timeInterned)
-    timeInterned[] = "time"
-
-    var internedStrings = initTable[string, ref string]()
-    internedStrings["time"] = timeInterned
-
     var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (super: (compressed: compressed, destroyed: false, line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]()), 
+    context[] = (super: newReadLinesContext(compressed, request.client.recvWholeBuffer), 
         contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, retFuture: result, routerResult: routerResult)
 
     context.read = context.super.lines.len
@@ -763,74 +755,15 @@ proc quitUsage() =
     stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> <influxdb address:influxdb port> [cors allowed origin]")
     quit(QuitFailure)
 
-block:
-    var dbHostnameString = "localhost"
-    dbPort = 3306
-
-    var httpServerHostname = ""
-    var httpServerPort = 8086
-
-    let params = paramCount()
-
-    if (params < 2) or (params > 3):
-        if (params < 2):
-            stderr.writeLine("Error: Not enough arguments specified!")
-        else:
-            stderr.writeLine("Error: Too many arguments specified!")
-
-        quitUsage()
-
-    let dbConnectionInfo = paramStr(1).split(':')
-    let httpServerInfo = paramStr(2).split(':')
-
-    case dbConnectionInfo.len:
-    of 0:
-        discard
-    of 1:
-        dbHostnameString = dbConnectionInfo[0]
-    of 2:
-        dbHostnameString = dbConnectionInfo[0]
-
-        try:
-            dbPort = cint(dbConnectionInfo[1].parseInt)
-        except ValueError:
-            stderr.writeLine("Error: Invalid mysql port specified!")
-            quitUsage()
-    else:
-        stderr.writeLine("Error: Invalid mysql address, mysql port combination specified!")
-        quitUsage()
-
-    case httpServerInfo.len:
-    of 0:
-        discard
-    of 1:
-        httpServerHostname = httpServerInfo[0]
-    of 2:
-        httpServerHostname = httpServerInfo[0]
-
-        try:
-            httpServerPort = httpServerInfo[1].parseInt
-        except ValueError:
-            stderr.writeLine("Error: Invalid influxdb port specified!")
-            quitUsage()
-    else:
-        stderr.writeLine("Error: Invalid influxdb address, influxdb port combination specified!")
-        quitUsage()
-
-    dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
-    copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
-
+cmdlineMain():
     if params == 3:
         var corsAllowOriginString = paramStr(3)
 
         corsAllowOrigin = cast[cstring](allocShared0(corsAllowOriginString.len + 1))
         copyMem(addr(corsAllowOrigin[0]), addr(corsAllowOriginString[0]), corsAllowOriginString.len)
-
-    defer:
-        deallocShared(dbHostname)
-
-        if (corsAllowOrigin != nil):
-            deallocShared(corsAllowOrigin)
+    elif params > 3:
+        stderr.writeLine("Error: Too many arguments specified!")
+        quitUsage()
 
     try:
         waitFor newMicroAsyncHttpServer().serve(Port(httpServerPort), router, httpServerHostname)
