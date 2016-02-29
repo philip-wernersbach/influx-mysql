@@ -1,6 +1,5 @@
 {.boundChecks: on.}
 
-import macros
 import future
 import strtabs
 import strutils
@@ -9,7 +8,6 @@ import asyncnet
 import asynchttpserver
 from net import BufferSize, TimeoutError
 import lists
-import hashes as hashes
 import tables
 import json
 import base64
@@ -21,6 +19,7 @@ import sets
 import qt5_qtsql
 import snappy as snappy
 
+import stdlib_extra
 import reflists
 import microasynchttpserver
 import qsqldatabase
@@ -30,9 +29,9 @@ import qdatetime
 import qsqlrecord
 import influxql_to_sql
 import influx_line_protocol_to_sql
+import influx_mysql_backend
 
-type 
-    DBQueryException = object of IOError
+type
     URLParameterError = object of ValueError
     URLParameterNotFoundError = object of URLParameterError
     URLParameterInvalidError = object of URLParameterError
@@ -93,6 +92,16 @@ type
         Microsecond
         Nanosecond
 
+    ReadLinesFutureContext* = ref tuple
+        super: ReadLinesContext
+        contentLength: int
+        read: int
+        noReadsCount: int
+        readNow: string
+        request: Request
+        retFuture: Future[ReadLinesFutureContext]
+        routerResult: Future[void]
+
 const QUERY_HTTP_METHODS = "GET"
 const WRITE_HTTP_METHODS = "POST"
 const PING_HTTP_METHODS = "GET, HEAD"
@@ -106,15 +115,6 @@ else:
 
 const cacheControlDontCacheHeader = "private, max-age=" & cacheControlZeroAge & ", s-maxage=" & cacheControlZeroAge & ", no-cache"
 const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s-maxage=" & cachecontrolmaxage
-
-# sqlbuffersize sets the initial size of the SQL INSERT query buffer for POST /write commands.
-# The default size is MySQL's default max_allowed_packet value. Setting this to a higher size
-# will improve memory usage for INSERTs larger than the size, at the expense of overallocating
-# memory for INSERTs smaller than the size.
-when getEnv("sqlbuffersize") == "":
-    const SQL_BUFFER_SIZE = 2097152
-else:
-    const SQL_BUFFER_SIZE = getEnv("sqlbuffersize").parseInt
 
 var corsAllowOrigin: cstring = nil
 
@@ -132,92 +132,6 @@ template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
 
 template PING_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
-
-var dbHostname: cstring = nil
-var dbPort: cint = 0
-
-template hash(x: ref string): Hash =
-    hashes.hash(cast[pointer](x))
-
-macro useDB(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
-    # Create the try block that closes the database.
-    var safeBodyClose = newNimNode(nnkTryStmt)
-    safeBodyClose.add(body)
-
-    ## Create the finally clause
-    var safeBodyCloseFinally = newNimNode(nnkFinally)
-    safeBodyCloseFinally.add(parseStmt("database.close"))
-    
-    ## Add the finally clause to the try block.
-    safeBodyClose.add(safeBodyCloseFinally)
-
-    # Create the try block that removes the database.
-    var safeBodyRemove = newNimNode(nnkTryStmt)
-    safeBodyRemove.add(
-        newBlockStmt(
-            newStmtList(
-                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("QMYSQL"), newIdentNode(!"qSqlDatabaseName"))),
-                newCall(!"setHostName", newIdentNode(!"database"), newIdentNode(!"dbHostName")),
-                newCall(!"setDatabaseName", newIdentNode(!"database"), dbName),
-                newCall(!"setPort", newIdentNode(!"database"), newIdentNode(!"dbPort")),
-                newCall(!"open", newIdentNode(!"database"), dbUsername, dbPassword),
-                safeBodyClose
-            )
-        )
-    )
-
-    ## Create the finally clause.
-    var safeBodyRemoveFinally = newNimNode(nnkFinally)
-    safeBodyRemoveFinally.add(parseStmt("qSqlDatabaseRemoveDatabase(qSqlDatabaseName)"))
-
-    ## Add the finally clause to the try block.
-    safeBodyRemove.add(safeBodyRemoveFinally)
-
-    # Put it all together.
-    result = newBlockStmt(
-                newStmtList(
-                    parseStmt("""
-
-var qSqlDatabaseStackId: uint8
-var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
-                    """), 
-                    safeBodyRemove
-                )
-            )
-
-proc strdup(s: var string): string =
-    result = newString(s.len)
-    copyMem(addr(result[0]), addr(s[0]), result.len)
-
-proc strdup(s: var cstring): string =
-    result = newString(s.len)
-    copyMem(addr(result[0]), addr(s[0]), result.len)
-
-template useQuery(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
-    try:
-        query.prepare(sql)
-        query.exec
-    except QSqlException:
-        var exceptionMsg = cast[string](getCurrentExceptionMsg())
-        var newExceptionMsg = exceptionMsg.strdup
-
-        raise newException(DBQueryException, newExceptionMsg)
-
-template useQuery(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
-    var query = database.qSqlQuery()
-    sql.useQuery(query)
-
-proc runDBQueryWithTransaction(sql: cstring, dbName: string, dbUsername: string, dbPassword: string) =
-    useDB(dbName, dbUsername, dbPassword):
-        block:
-            "SET time_zone='UTC'".useQuery(database)
-
-        database.beginTransaction
-        sql.useQuery(database)
-        database.commitTransaction
-
-        # Workaround for weird compiler corner case
-        database.close
 
 proc getParams(request: Request): StringTableRef =
     result = newStringTable(modeCaseSensitive)
@@ -592,30 +506,14 @@ when defined(linux):
 else:
     const MSG_DONTWAIT = 0
 
-type
-    ReadLinesFutureContext = ref tuple
-        contentLength: int
-        read: int
-        noReadsCount: int
-        compressed: bool
-        destroyed: bool
-        readNow: string
-        line: string
-        lines: string
-        internedStrings: Table[string, ref string]
-        entries: Table[ref string, SQLEntryValues]
-        request: Request
-        retFuture: Future[ReadLinesFutureContext]
-        routerResult: Future[void]
-
 proc destroyReadLinesFutureContext(context: ReadLinesFutureContext not nil) =
-    if not context.destroyed:
+    if not context.super.destroyed:
         try:
             GC_disable()
 
             # SQLEntryValues.entries is a manually allocated object, so we
             # need to free it.
-            for entry in context.entries.values:
+            for entry in context.super.entries.values:
                 entry.entries.removeAll
 
             # Probably not needed, but better safe than sorry
@@ -627,7 +525,7 @@ proc destroyReadLinesFutureContext(context: ReadLinesFutureContext not nil) =
             if not context.routerResult.finished:
                 context.routerResult.complete
 
-            context.destroyed = true
+            context.super.destroyed = true
         finally:
             GC_enable()
 
@@ -690,42 +588,13 @@ proc postReadLines(context: ReadLinesFutureContext not nil) =
                     context.noReadsCount = 0
 
                 context.read += context.readNow.len
-                context.lines.add(context.readNow)
+                context.super.lines.add(context.readNow)
 
             chunkLen = context.contentLength - context.read
 
-            if (not context.compressed) or (chunkLen <= 0):
-                var lineStart = 0
-
-                if context.compressed:
-                    context.lines = snappy.uncompress(context.lines)
-
-                while lineStart < context.lines.len:
-                    let lineEnd = context.lines.find("\n", lineStart) - "\n".len
-
-                    if lineEnd < 0 or lineEnd >= context.lines.len:
-                        break
-
-                    let lineNewSize = lineEnd - lineStart + 1
-                    context.line.setLen(lineNewSize)
-                    copyMem(addr(context.line[0]), addr(context.lines[lineStart]), lineNewSize)
-
-                    if context.line.len > 0:
-                        when defined(logrequests):
-                            stdout.write("/write: ")
-                            stdout.writeLine(context.line)
-
-                        context.line.lineProtocolToSQLEntryValues(context.entries, context.internedStrings)
-
-                    lineStart = lineEnd + "\n".len + 1
-
-                if lineStart < context.lines.len:
-                    let linesNewSize = context.lines.len - lineStart
-                    
-                    moveMem(addr(context.lines[0]), addr(context.lines[lineStart]), linesNewSize)
-                    context.lines.setLen(linesNewSize)
-                else:
-                    context.lines.setLen(0)
+            if (not context.super.compressed) or (chunkLen <= 0):
+                context.super.uncompressOverwrite
+                context.super.linesToSQLEntryValues
 
             if chunkLen <= 0:
                 break
@@ -774,10 +643,10 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (contentLength: contentLength, read: 0, noReadsCount: 0, compressed: compressed, destroyed: false, readNow: newString(BufferSize), line: "", lines: request.client.recvWholeBuffer,
-        internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues](), request: request, retFuture: result, routerResult: routerResult)
+    context[] = (super: (compressed: compressed, destroyed: false, line: "", lines: request.client.recvWholeBuffer, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]()), 
+        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, retFuture: result, routerResult: routerResult)
 
-    context.read = context.lines.len
+    context.read = context.super.lines.len
 
     context.postReadLines
 
@@ -790,7 +659,6 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
         var dbName = ""
         var dbUsername = ""
         var dbPassword = ""
-        var sql = newStringOfCap(SQL_BUFFER_SIZE)
 
         let context = ioResult.read
 
@@ -806,15 +674,7 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
             if params.hasKey("p"):
                 dbPassword = params["p"]
 
-            for pair in context.entries.pairs:
-                pair.sqlEntryValuesToSQL(sql)
-
-                when defined(logrequests):
-                    stdout.write("/write: ")
-                    stdout.writeLine(sql)
-
-                sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
-                sql.setLen(0)
+            context.super.processSQLEntryValuesAndRunDBQuery(dbName, dbUsername, dbPassword)
 
             asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 
