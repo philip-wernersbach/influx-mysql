@@ -28,9 +28,9 @@ var dbPort*: cint = 0
 # will improve memory usage for INSERTs larger than the size, at the expense of overallocating
 # memory for INSERTs smaller than the size.
 when getEnv("sqlbuffersize") == "":
-    const SQL_BUFFER_SIZE = 2097152
+    const SQL_BUFFER_SIZE* = 2097152
 else:
-    const SQL_BUFFER_SIZE = getEnv("sqlbuffersize").parseInt
+    const SQL_BUFFER_SIZE* = getEnv("sqlbuffersize").parseInt
 
 macro useDB*(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
     # Create the try block that closes the database.
@@ -92,7 +92,7 @@ template useQuery*(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
     var query = database.qSqlQuery()
     sql.useQuery(query)
 
-proc runDBQueryWithTransaction(sql: cstring, dbName: cstring, dbUsername: cstring, dbPassword: cstring) =
+proc runDBQueryWithTransaction*(sql: cstring, dbName: cstring, dbUsername: cstring, dbPassword: cstring) =
     useDB(dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='UTC'".useQuery(database)

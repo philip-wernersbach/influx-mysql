@@ -1,11 +1,27 @@
 import os
 import strutils
+import tables
 
 import snappy as snappy
 
 import jnim
+import influx_line_protocol_to_sql
 import influx_mysql_cmdline
 import influx_mysql_backend
+
+const MAX_SERVER_SUBMIT_THREADS = 16
+
+type
+    DBQueryContext = tuple
+        dbName: cstring
+        dbUsername: cstring
+        dbPassword: cstring
+        sql: cstring
+
+var threads: array[MAX_SERVER_SUBMIT_THREADS, Thread[int]]
+var threadInputs: array[MAX_SERVER_SUBMIT_THREADS, Channel[bool]]
+var threadOutputs: array[MAX_SERVER_SUBMIT_THREADS, Channel[bool]]
+var threadInputsData: array[MAX_SERVER_SUBMIT_THREADS, DBQueryContext]
 
 jnimport:
     # Import a couple of classes
@@ -38,51 +54,108 @@ iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBat
         finally:
             currentEnv.PopLocalFrameNullReturn
 
-proc compressedBatchPointsProcessor() =
-    for points in ProcessingProxy.pointsQueue.waitEach:
-        let usernameObj = points.getUsername
-        let usernameString = usernameObj.cstringFromJstring(currentEnv, currentEnv)
-
+proc runDBQueryWithTransaction(id: int) {.thread.} =
+    while threadInputs[id].recv:
         try:
-            let passwordObj = points.getPassword
-            let passwordString = passwordObj.cstringFromJstring(currentEnv, currentEnv)
+            let context = threadInputsData[id]
+
+            context.sql.runDBQueryWithTransaction(context.dbName, context.dbUsername, context.dbPassword)
+            threadOutputs[id].send(true)
+        except Exception:
+            threadOutputs[id].send(false)
+            raise getCurrentException()
+
+proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, dbName: cstring, dbUsername: cstring, dbPassword: cstring,
+    threadsSpawned: var int, sql: var array[MAX_SERVER_SUBMIT_THREADS, string]) {.inline.} =
+
+    let oldThreadsLen = threadsSpawned
+    let entriesLen = context.entries.len
+    var i = 0
+
+    if entriesLen > oldThreadsLen:
+        let sqlCap = SQL_BUFFER_SIZE div entriesLen
+
+        for i in oldThreadsLen..entriesLen-1:
+            sql[i] = newStringOfCap(sqlCap)
+            
+            threadInputs[i].open
+            threadOutputs[i].open
+            threads[i].createThread(runDBQueryWithTransaction, i)
+
+        threadsSpawned = entriesLen
+
+    for pair in context.entries.pairs:
+        pair.sqlEntryValuesToSQL(sql[i]) 
+
+        when defined(logrequests):
+            stdout.write("/write: ")
+            stdout.writeLine(sql[i])
+
+        threadInputsData[i] = (dbName: dbName, dbUsername: dbUsername, dbPassword: dbPassword, sql: cstring(addr(sql[i][0])))
+        threadInputs[i].send(true)
+        i += 1
+    
+    for i in 0..entriesLen-1:
+        discard threadOutputs[i].recv
+        sql[i].setLen(0)
+
+proc compressedBatchPointsProcessor() =
+    var threadsSpawned = 0
+    var sql: array[MAX_SERVER_SUBMIT_THREADS, string]
+
+    try:
+        for points in ProcessingProxy.pointsQueue.waitEach:
+            let usernameObj = points.getUsername
+            let usernameString = usernameObj.cstringFromJstring(currentEnv, currentEnv)
 
             try:
-                let databaseObj = points.getDatabase
-                let databaseString = databaseObj.cstringFromJstring(currentEnv, currentEnv)
+                let passwordObj = points.getPassword
+                let passwordString = passwordObj.cstringFromJstring(currentEnv, currentEnv)
 
                 try:
-                    var context: ReadLinesContext
-
-                    let clpObj = points.compressedLineProtocol
-                    let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
-
-                    if clpLen < 1:
-                        return
-
-                    let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
+                    let databaseObj = points.getDatabase
+                    let databaseString = databaseObj.cstringFromJstring(currentEnv, currentEnv)
 
                     try:
-                        context = newReadLinesContext(false, snappy.uncompress(cast[cstring](clpArray), clpLen))
-                    finally:
-                        currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
+                        var context: ReadLinesContext
 
-                    try:
-                        GC_disable()
+                        let clpObj = points.compressedLineProtocol
+                        let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
 
-                        context.linesToSQLEntryValues
-                        context.processSQLEntryValuesAndRunDBQuery(databaseString, usernameString, passwordString)
-                    finally:
+                        if clpLen < 1:
+                            return
+
+                        let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
+
                         try:
-                            context.destroyReadLinesContext
+                            context = newReadLinesContext(false, snappy.uncompress(cast[cstring](clpArray), clpLen))
                         finally:
-                            GC_enable()
+                            currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
+
+                        try:
+                            GC_disable()
+
+                            context.linesToSQLEntryValues
+                            context.processSQLEntryValuesAndRunDBQueryParallel(databaseString, usernameString, passwordString, threadsSpawned, sql)
+                        finally:
+                            try:
+                                context.destroyReadLinesContext
+                            finally:
+                                GC_enable()
+                    finally:
+                        currentEnv.ReleaseStringUTFChars(currentEnv, databaseObj, databaseString)
                 finally:
-                    currentEnv.ReleaseStringUTFChars(currentEnv, databaseObj, databaseString)
+                    currentEnv.ReleaseStringUTFChars(currentEnv, passwordObj, passwordString)
             finally:
-                currentEnv.ReleaseStringUTFChars(currentEnv, passwordObj, passwordString)
-        finally:
-            currentEnv.ReleaseStringUTFChars(currentEnv, usernameObj, usernameString)
+                currentEnv.ReleaseStringUTFChars(currentEnv, usernameObj, usernameString)
+    finally:
+        stdout.writeLine("Shutting down, waiting for influx_mysql_ignite worker threads to exit...")
+
+        for i in 0..threadsSpawned-1:
+            threadInputs[i].send(false)
+            threads[i].joinThread
+
+        stdout.writeLine("Shutting down, waiting for influx_mysql_ignite worker threads to exit... done.")
 
 proc quitUsage() =
     stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> \"\" <batch points buffer id> [-- java arguments]")
