@@ -103,6 +103,8 @@ proc compressedBatchPointsProcessor() =
     var threadsSpawned = 0
     var sql: array[MAX_SERVER_SUBMIT_THREADS, string]
 
+    var lineProtocol = newStringOfCap(SQL_BUFFER_SIZE)
+
     try:
         for points in ProcessingProxy.pointsQueue.waitEach:
             let usernameObj = points.getUsername
@@ -128,7 +130,10 @@ proc compressedBatchPointsProcessor() =
                         let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
 
                         try:
-                            context = newReadLinesContext(false, snappy.uncompress(cast[cstring](clpArray), clpLen))
+                            snappy.uncompressInto(cast[cstring](clpArray), lineProtocol, clpLen)
+
+                            context = newReadLinesContext(false, nil)
+                            context.lines.shallowCopy(lineProtocol)
                         finally:
                             currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
 

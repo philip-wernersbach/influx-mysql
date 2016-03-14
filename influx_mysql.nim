@@ -635,9 +635,10 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (super: newReadLinesContext(compressed, request.client.recvWholeBuffer), 
+    context[] = (super: newReadLinesContext(compressed, nil), 
         contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, retFuture: result, routerResult: routerResult)
 
+    context.super.lines = request.client.recvWholeBuffer
     context.read = context.super.lines.len
 
     context.postReadLines

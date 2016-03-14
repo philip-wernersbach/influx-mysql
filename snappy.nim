@@ -103,7 +103,7 @@ proc compress*(input:string):string =
   output.setLen(output_length)
   result = output
 
-proc uncompress*(input: cstring, inputLen: int):string =
+proc uncompressInto*(input: cstring, result: var string, inputLen: int) =
   ## Uncompress a string. The input string has to be
   ## a string compressed by `snappy`
   let can_uncompress = snappy_validate_compressed_buffer(input, inputLen)
@@ -119,7 +119,7 @@ proc uncompress*(input: cstring, inputLen: int):string =
   if status != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,$status)
 
-  result = newString(output_length)
+  result.setLen(output_length)
   status = snappy_uncompress(input,
                              inputLen,
                              result,
@@ -128,4 +128,8 @@ proc uncompress*(input: cstring, inputLen: int):string =
   if status != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,$status)
   
+proc uncompress*(input: cstring, inputLen: int): string =
+    result = ""
+    input.uncompressInto(result, inputLen)
+
 template uncompress*(input:string):string = uncompress(input, input.len)
