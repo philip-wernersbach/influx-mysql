@@ -12,6 +12,22 @@ import influx_mysql_backend
 const MAX_SERVER_SUBMIT_THREADS = 16
 
 type
+    ParallelExecutionContext = tuple
+        hasLast: bool
+
+        entriesLen: int
+        threadsSpawned: int
+        lineProtocol: string
+        sql: array[MAX_SERVER_SUBMIT_THREADS, string]
+
+        lastUsernameObj: jstring
+        lastPasswordObj: jstring
+        lastDatabaseObj: jstring
+        
+        lastUsernameString: cstring
+        lastPasswordString: cstring
+        lastDatabaseString: cstring
+
     DBQueryContext = tuple
         dbName: cstring
         dbUsername: cstring
@@ -66,97 +82,110 @@ proc runDBQueryWithTransaction(id: int) {.thread.} =
             raise getCurrentException()
 
 proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, dbName: cstring, dbUsername: cstring, dbPassword: cstring,
-    threadsSpawned: var int, sql: var array[MAX_SERVER_SUBMIT_THREADS, string]) {.inline.} =
+    parallelContext: var ParallelExecutionContext) {.inline.} =
 
-    let oldThreadsLen = threadsSpawned
-    let entriesLen = context.entries.len
     var i = 0
 
-    if entriesLen > oldThreadsLen:
-        let sqlCap = SQL_BUFFER_SIZE div entriesLen
+    let oldThreadsLen = parallelContext.threadsSpawned
+    parallelContext.entriesLen = context.entries.len
 
-        for i in oldThreadsLen..entriesLen-1:
-            sql[i] = newStringOfCap(sqlCap)
+    if parallelContext.entriesLen > oldThreadsLen:
+        let sqlCap = SQL_BUFFER_SIZE div parallelContext.entriesLen
+
+        for i in oldThreadsLen..parallelContext.entriesLen-1:
+            parallelContext. sql[i] = newStringOfCap(sqlCap)
             
             threadInputs[i].open
             threadOutputs[i].open
             threads[i].createThread(runDBQueryWithTransaction, i)
 
-        threadsSpawned = entriesLen
+        parallelContext.threadsSpawned = parallelContext.entriesLen
 
     for pair in context.entries.pairs:
-        pair.sqlEntryValuesToSQL(sql[i]) 
+        pair.sqlEntryValuesToSQL(parallelContext.sql[i]) 
 
         when defined(logrequests):
             stdout.write("/write: ")
             stdout.writeLine(sql[i])
 
-        threadInputsData[i] = (dbName: dbName, dbUsername: dbUsername, dbPassword: dbPassword, sql: cstring(addr(sql[i][0])))
+        threadInputsData[i] = (dbName: dbName, dbUsername: dbUsername, dbPassword: dbPassword, sql: cstring(addr(parallelContext.sql[i][0])))
         threadInputs[i].send(true)
         i += 1
-    
-    for i in 0..entriesLen-1:
-        discard threadOutputs[i].recv
-        sql[i].setLen(0)
 
 proc compressedBatchPointsProcessor() =
-    var threadsSpawned = 0
-    var sql: array[MAX_SERVER_SUBMIT_THREADS, string]
+    var parallelContext: ParallelExecutionContext
 
-    var lineProtocol = newStringOfCap(SQL_BUFFER_SIZE)
+    parallelContext.hasLast = false
+    parallelContext.entriesLen = 0
+    parallelContext.threadsSpawned = 0
+    parallelContext.lineProtocol = newStringOfCap(SQL_BUFFER_SIZE)
 
     try:
         for points in ProcessingProxy.pointsQueue.waitEach:
             let usernameObj = points.getUsername
             let usernameString = usernameObj.cstringFromJstring(currentEnv, currentEnv)
 
+            let passwordObj = points.getPassword
+            let passwordString = passwordObj.cstringFromJstring(currentEnv, currentEnv)
+
+            let databaseObj = points.getDatabase
+            let databaseString = databaseObj.cstringFromJstring(currentEnv, currentEnv)
+
+            var context: ReadLinesContext
+
+            let clpObj = points.compressedLineProtocol
+            let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
+
+            if clpLen < 1:
+                return
+
+            let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
+
             try:
-                let passwordObj = points.getPassword
-                let passwordString = passwordObj.cstringFromJstring(currentEnv, currentEnv)
+                snappy.uncompressInto(cast[cstring](clpArray), parallelContext.lineProtocol, clpLen)
 
-                try:
-                    let databaseObj = points.getDatabase
-                    let databaseString = databaseObj.cstringFromJstring(currentEnv, currentEnv)
-
-                    try:
-                        var context: ReadLinesContext
-
-                        let clpObj = points.compressedLineProtocol
-                        let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
-
-                        if clpLen < 1:
-                            return
-
-                        let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
-
-                        try:
-                            snappy.uncompressInto(cast[cstring](clpArray), lineProtocol, clpLen)
-
-                            context = newReadLinesContext(false, nil)
-                            context.lines.shallowCopy(lineProtocol)
-                        finally:
-                            currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
-
-                        try:
-                            GC_disable()
-
-                            context.linesToSQLEntryValues
-                            context.processSQLEntryValuesAndRunDBQueryParallel(databaseString, usernameString, passwordString, threadsSpawned, sql)
-                        finally:
-                            try:
-                                context.destroyReadLinesContext
-                            finally:
-                                GC_enable()
-                    finally:
-                        currentEnv.ReleaseStringUTFChars(currentEnv, databaseObj, databaseString)
-                finally:
-                    currentEnv.ReleaseStringUTFChars(currentEnv, passwordObj, passwordString)
+                context = newReadLinesContext(false, nil)
+                context.lines.shallowCopy(parallelContext.lineProtocol)
             finally:
-                currentEnv.ReleaseStringUTFChars(currentEnv, usernameObj, usernameString)
+                currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
+
+            try:
+                GC_disable()
+
+                # Parse data into the context.
+                context.linesToSQLEntryValues
+
+                # Wait until last process is done.
+                if parallelContext.hasLast:
+                    for i in 0..parallelContext.entriesLen-1:
+                        discard threadOutputs[i].recv
+                        parallelContext.sql[i].setLen(0)
+
+                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastDatabaseObj, parallelContext.lastDatabaseString)
+                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastPasswordObj, parallelContext.lastPasswordString)
+                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastUsernameObj, parallelContext.lastUsernameString)
+
+                # Process the context.
+                context.processSQLEntryValuesAndRunDBQueryParallel(databaseString, usernameString, passwordString,
+                    parallelContext)
+
+                parallelContext.lastDatabaseObj = databaseObj
+                parallelContext.lastDatabaseString = databaseString
+                parallelContext.lastPasswordObj = passwordObj
+                parallelContext.lastPasswordString = passwordString
+                parallelContext.lastUsernameObj = usernameObj
+                parallelContext.lastUsernameString = usernameString
+
+                parallelContext.hasLast = true
+            finally:
+                try:
+                    context.destroyReadLinesContext
+                finally:
+                    GC_enable()
     finally:
         stdout.writeLine("Shutting down, waiting for influx_mysql_ignite worker threads to exit...")
 
-        for i in 0..threadsSpawned-1:
+        for i in 0..parallelContext.threadsSpawned-1:
             threadInputs[i].send(false)
             threads[i].joinThread
 
