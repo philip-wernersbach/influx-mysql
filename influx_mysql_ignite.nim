@@ -12,6 +12,9 @@ import influx_mysql_backend
 const MAX_SERVER_SUBMIT_THREADS = 16
 
 type
+    JavaOperationException = object of Exception
+    ParallelExecutionException = object of Exception
+
     ParallelExecutionContext = tuple
         hasLast: bool
 
@@ -61,9 +64,13 @@ jnimport:
     proc getDatabase(obj: CompressedBatchPoints): jstring
     proc compressedLineProtocol(obj: CompressedBatchPoints): jByteArray
 
+template PushLocalFrame*(env: JNIEnvPtr, capacity: jint) =
+    if unlikely(jnim.PushLocalFrame(env, capacity) != 0):
+        raise newException(JavaOperationException, "JNI PushLocalFrame() failed!")
+
 iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBatchPoints {.inline.} =
     while true:
-        discard currentEnv.PushLocalFrame(5)
+        currentEnv.PushLocalFrame(5)
 
         try:
             yield queue.take
@@ -71,15 +78,19 @@ iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBat
             currentEnv.PopLocalFrameNullReturn
 
 proc runDBQueryWithTransaction(id: int) {.thread.} =
-    while threadInputs[id].recv:
-        try:
+    try:
+        while threadInputs[id].recv:
             let context = threadInputsData[id]
 
             context.sql.runDBQueryWithTransaction(context.dbName, context.dbUsername, context.dbPassword)
             threadOutputs[id].send(true)
-        except Exception:
-            threadOutputs[id].send(false)
-            raise getCurrentException()
+    except Exception:
+        threadOutputs[id].send(false)
+
+        let e = getCurrentException()
+        stderr.writeLine(e.getStackTrace() & "Thread " & $id & ": Error: unhandled exception: " & getCurrentExceptionMsg())
+
+        raise e
 
 proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, dbName: cstring, dbUsername: cstring, dbPassword: cstring,
     parallelContext: var ParallelExecutionContext) {.inline.} =
@@ -93,7 +104,7 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
         let sqlCap = SQL_BUFFER_SIZE div parallelContext.entriesLen
 
         for i in oldThreadsLen..parallelContext.entriesLen-1:
-            parallelContext. sql[i] = newStringOfCap(sqlCap)
+            parallelContext.sql[i] = newStringOfCap(sqlCap)
             
             threadInputs[i].open
             threadOutputs[i].open
@@ -111,6 +122,18 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
         threadInputsData[i] = (dbName: dbName, dbUsername: dbUsername, dbPassword: dbPassword, sql: cstring(addr(parallelContext.sql[i][0])))
         threadInputs[i].send(true)
         i += 1
+
+proc ensureParallelExecutionsCompleted(parallelContext: var ParallelExecutionContext) =
+    if parallelContext.hasLast:
+        for i in 0..parallelContext.entriesLen-1:
+            if threadOutputs[i].recv:
+                parallelContext.sql[i].setLen(0)
+            else:
+                raise newException(ParallelExecutionException, "Thread " & $i & "'s execution did not complete correctly!")
+
+        currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastDatabaseObj, parallelContext.lastDatabaseString)
+        currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastPasswordObj, parallelContext.lastPasswordString)
+        currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastUsernameObj, parallelContext.lastUsernameString)
 
 proc compressedBatchPointsProcessor() =
     var parallelContext: ParallelExecutionContext
@@ -137,6 +160,10 @@ proc compressedBatchPointsProcessor() =
             let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
 
             if clpLen < 1:
+                # Wait until last process is done.
+                parallelContext.ensureParallelExecutionsCompleted
+
+                parallelContext.hasLast = false
                 return
 
             let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
@@ -156,14 +183,7 @@ proc compressedBatchPointsProcessor() =
                 context.linesToSQLEntryValues
 
                 # Wait until last process is done.
-                if parallelContext.hasLast:
-                    for i in 0..parallelContext.entriesLen-1:
-                        discard threadOutputs[i].recv
-                        parallelContext.sql[i].setLen(0)
-
-                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastDatabaseObj, parallelContext.lastDatabaseString)
-                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastPasswordObj, parallelContext.lastPasswordString)
-                    currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastUsernameObj, parallelContext.lastUsernameString)
+                parallelContext.ensureParallelExecutionsCompleted
 
                 # Process the context.
                 context.processSQLEntryValuesAndRunDBQueryParallel(databaseString, usernameString, passwordString,
@@ -225,7 +245,7 @@ cmdlineMain():
     # Start an embedded JVM
     let jvm = newJavaVM(jvmArgs)
 
-    discard currentEnv.PushLocalFrame(2)
+    currentEnv.PushLocalFrame(2)
 
     try:
         let i = InfluxMysqlIgnite.new(bufferId)
@@ -234,5 +254,10 @@ cmdlineMain():
             compressedBatchPointsProcessor()
         finally:
             i.shutdown
+    except Exception:
+        let e = getCurrentException()
+        stderr.writeLine(e.getStackTrace() & "Error: unhandled exception: " & getCurrentExceptionMsg())
+
+        raise e
     finally:
         currentEnv.PopLocalFrameNullReturn
