@@ -1,3 +1,5 @@
+{.boundChecks: on.}
+
 import os
 import strutils
 import tables

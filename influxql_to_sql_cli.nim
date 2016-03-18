@@ -1,3 +1,5 @@
+{.boundChecks: on.}
+
 import sets
 
 import influxql_to_sql
