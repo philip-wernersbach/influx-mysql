@@ -250,10 +250,8 @@ cmdlineMain():
     try:
         let i = InfluxMysqlIgnite.new(bufferId)
 
-        try:
-            compressedBatchPointsProcessor()
-        finally:
-            i.shutdown
+        compressedBatchPointsProcessor()
+        i.shutdown
     except Exception:
         let e = getCurrentException()
         stderr.writeLine(e.getStackTrace() & "Error: unhandled exception: " & getCurrentExceptionMsg())
