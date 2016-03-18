@@ -150,7 +150,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     # The length of the entry values seq is the total number of datapoints, if you will:
     # <number of tags> + <number of fields> + <one for the timestamp>
-    let entryValuesLen = keyAndTagsListLen + fieldsListLen + 1
+    let entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
 
     var entryValues: ref seq[string]
     new(entryValues)
