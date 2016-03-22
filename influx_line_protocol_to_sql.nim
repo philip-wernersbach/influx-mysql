@@ -234,6 +234,8 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
     
     first = true
     for entry in kv.value.entries.items:
+        let entryLen = entry[].len
+
         if not first:
             result.add(",")
         else:
@@ -245,7 +247,7 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
             if columnPos > 0:
                 result.add(",")
 
-            if entry[columnPos] != nil:
+            if (columnPos < entryLen) and (entry[columnPos] != nil):
                 result.add(entry[columnPos])
             else:
                 result.add("NULL")
