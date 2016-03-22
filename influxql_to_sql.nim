@@ -98,12 +98,26 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
 
                             for j in countUp(wherePartStart, lastValidPart):
                                 if parts[j] == "WHERE":
-                                    let conditionsPartStart = j + 1
+                                    var glob = false
+                                    var globOpen = 0
 
-                                    for k in countUp(conditionsPartStart, lastValidPart):
-                                        if (parts[k][0] == '{') and (parts[k][parts[k].len - 1] == '}'):
-                                            parts[k][0] = '('
-                                            parts[k][parts[k].len - 1] = ')'
+                                    var k = j + 1
+
+                                    while k <= lastValidPart:
+                                        if glob or (parts[k][0] == '{'):
+                                            let lastChar = parts[k].len - 1
+
+                                            if not glob:
+                                                globOpen = k
+                                                glob = true
+
+                                            if parts[k][lastChar] == '}':
+                                                parts[globOpen][0] = '('
+                                                parts[k][lastChar] = ')'
+
+                                                glob = false
+
+                                        k += 1
 
                                     break
 
