@@ -133,7 +133,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     var timestampSQL = newStringOfCap(timestamp.len + 14 + 29)
     timestampSQL.add("FROM_UNIXTIME(")
     timestampSQL.add(timestamp)
-    timestampSQL.add(" * 0.000000001)")
+    timestampSQL.add("*0.000000001)")
 
     var keyInterned = internedStrings.getOrDefault(key)
     if keyInterned == nil:
@@ -218,7 +218,7 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
     result.add("INSERT INTO ")
     result.add(kv.key[])
 
-    result.add(" ( ")
+    result.add(" (")
 
     var first = true
     for columnName in kv.value.order.keys:
@@ -230,7 +230,7 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
         result.add(columnName[])
 
     # Add column values
-    result.add(" ) VALUES")
+    result.add(") VALUES ")
     
     first = true
     for entry in kv.value.entries.items:
@@ -241,7 +241,7 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
         else:
             first = false
 
-        result.add(" ( ")
+        result.add("(")
         
         for columnPos in kv.value.order.values:
             if columnPos > 0:
@@ -252,6 +252,6 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
             else:
                 result.add("NULL")
 
-        result.add(" )")
+        result.add(")")
 
     result.add(";\n")
