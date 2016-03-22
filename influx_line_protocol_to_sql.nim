@@ -12,8 +12,28 @@ type
         order: OrderedTableRef[ref string, int] not nil
         entries: SinglyLinkedRefList[seq[string]] not nil
 
+when not compileOption("threads"):
+    var booleanTrueValue = "TRUE"
+    var booleanFalseValue = "FALSE"
+
+    shallow(booleanTrueValue)
+    shallow(booleanFalseValue)
+else:
+    var booleanTrueValue {.threadvar.}: string
+    var booleanFalseValue {.threadvar.}: string
+
 template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
+
+when compileOption("threads"):
+    proc initInfluxLineProtocolToSQL*() =
+        if booleanTrueValue == nil:
+            booleanTrueValue = "TRUE"
+            shallow(booleanTrueValue)
+
+        if booleanFalseValue == nil:
+            booleanFalseValue = "FALSE"
+            shallow(booleanFalseValue)
 
 proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
     let entryLen = entry.len
@@ -113,7 +133,7 @@ proc valueType(value: string): InfluxValueType =
         else:
             result = InfluxValueType.FLOAT
 
-proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string]) =
+proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string]) {.gcsafe.} =
     let keyAndTags = entry.getToken(' ', 0)
 
     let fieldsStart = keyAndTags.len + 1
@@ -121,7 +141,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     let timestamp = entry.getToken(' ', fieldsStart + fields.len + 1)
 
-    let key = entry.getToken({',', ' '}, 0)
+    var key = entry.getToken({',', ' '}, 0)
 
     let timeInterned = internedStrings["time"]
 
@@ -130,15 +150,12 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     let fieldsList = fields.tokens(',')
     let fieldsListLen = fieldsList.len
 
-    var timestampSQL = newStringOfCap(timestamp.len + 14 + 29)
-    timestampSQL.add("FROM_UNIXTIME(")
-    timestampSQL.add(timestamp)
-    timestampSQL.add("*0.000000001)")
-
     var keyInterned = internedStrings.getOrDefault(key)
     if keyInterned == nil:
+        shallow(key)
+
         new(keyInterned)
-        keyInterned[] = key
+        keyInterned[].shallowCopy(key)
 
         internedStrings[key] = keyInterned
 
@@ -156,60 +173,72 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     new(entryValues)
     entryValues[] = newSeq[string](entryValuesLen)
 
-    shallow(timestampSQL)
-    entryValues[order.mgetOrPut(timeInterned, order.len)].shallowCopy(timestampSQL)
+    let entryValuesPos = order.mgetOrPut(timeInterned, order.len)
+
+    entryValues[entryValuesPos] = newStringOfCap(timestamp.len + 14 + 29)
+    entryValues[entryValuesPos].add("FROM_UNIXTIME(")
+    entryValues[entryValuesPos].add(timestamp)
+    entryValues[entryValuesPos].add("*0.000000001)")
+    shallow(entryValues[entryValuesPos])
 
     for tagAndValue in keyAndTagsList.items:
-        let tag = tagAndValue.getToken('=', 0)
-        var value = tagAndValue[tag.len+1..tagAndValue.len-1]
+        var tag = tagAndValue.getToken('=', 0)
 
         var tagInterned = internedStrings.getOrDefault(tag)
         if tagInterned == nil:
+            shallow(tag)
+
             new(tagInterned)
-            tagInterned[] = tag
+            tagInterned[].shallowCopy(tag)
 
             internedStrings[tag] = tagInterned
 
-        value = value.escape("'", "'")
-        shallow(value)
-        entryValues[order.mgetOrPut(tagInterned, order.len)].shallowCopy(value)
+        let entryValuesPos = order.mgetOrPut(tagInterned, order.len)
+
+        entryValues[entryValuesPos] = tagAndValue[tag.len+1..tagAndValue.len-1].escape("'", "'")
+        shallow(entryValues[entryValuesPos])
 
     for nameAndValue in fieldsList.items:
-        let name = nameAndValue.getToken('=', 0)
+        var name = nameAndValue.getToken('=', 0)
         var value = nameAndValue[name.len+1..nameAndValue.len-1]
 
         var nameInterned = internedStrings.getOrDefault(name)
         if nameInterned == nil:
+            shallow(name)
+
             new(nameInterned)
-            nameInterned[] = name
+            nameInterned[].shallowCopy(name)
 
             internedStrings[name] = nameInterned
 
         case value.valueType:
         of InfluxValueType.INTEGER:
-            value = value[0..value.len-1]
-            shallow(value)
+            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
+            entryValues[entryValuesPos] = value[0..value.len-1]
+            shallow(entryValues[entryValuesPos])
         of InfluxValueType.STRING:
-            value = value.unescape.escape("'", "'")
-            shallow(value)
+            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
+            entryValues[entryValuesPos] = value.unescape.escape("'", "'")
+            shallow(entryValues[entryValuesPos])
         of InfluxValueType.FLOAT:
-            shallow(value)
+            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
+            shallow(value)
+            entryValues[entryValuesPos].shallowCopy(value)
+            shallow(entryValues[entryValuesPos])
         of InfluxValueType.BOOLEAN_TRUE:
-            value = "TRUE"
-            shallow(value)
+            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
-            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
+            entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
+            shallow(entryValues[entryValuesPos])
         of InfluxValueType.BOOLEAN_FALSE:
-            value = "FALSE"
-            shallow(value)
-            
-            entryValues[order.mgetOrPut(nameInterned, order.len)].shallowCopy(value)
+            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
+
+            entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
+            shallow(entryValues[entryValuesPos])
+
 
     result[keyInterned].entries.append(entryValues)
 

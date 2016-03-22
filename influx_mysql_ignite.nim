@@ -244,6 +244,9 @@ cmdlineMain():
 
     jvmArgs.delete(i-1)
 
+    # Initialize thread-local stuff
+    initInfluxLineProtocolToSQL()
+
     # Start an embedded JVM
     let jvm = newJavaVM(jvmArgs)
 
