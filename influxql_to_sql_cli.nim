@@ -16,4 +16,5 @@ proc influxQlToSql(influxQl: string): string =
 
 block:
     for line in stdin.lines:
-        stdout.writeLine(line.influxQlToSql)
+        for statement in line.splitInfluxQlStatements:
+            stdout.writeLine(statement.influxQlToSql)

@@ -464,7 +464,7 @@ proc getQuery(request: Request): Future[void] =
 
         var cache = true
 
-        for line in urlQuery.splitLines:
+        for line in urlQuery.splitInfluxQlStatements:
             var series: string
             var period = uint64(0)
             var fillNull = false

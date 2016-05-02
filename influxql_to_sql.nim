@@ -65,6 +65,61 @@ proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalT
     if newPart.len > (intervalType.len + 10):
         parts[i] = newPart
 
+iterator splitIndividualStatements(stmts: string, begin: Natural, pos: Natural): string =
+    var begin = begin
+    var pos = int(pos)
+    let length = stmts.len
+
+    while true:
+        if (pos > begin) and ((
+                (length > (pos + 6)) and
+                    (
+                        (
+                            (stmts[pos + 1] == 'S') and (stmts[pos + 2] == 'E') and (stmts[pos + 3] == 'L') and
+                            (stmts[pos + 4] == 'E') and (stmts[pos + 5] == 'C') and (stmts[pos + 6] == 'T')
+                        ) or
+
+                        (
+                            (stmts[pos + 1] == 'R') and (stmts[pos + 2] == 'A') and (stmts[pos + 3] == 'W') and
+                            (stmts[pos + 4] == 'S') and (stmts[pos + 5] == 'Q') and (stmts[pos + 6] == 'L')
+                        )
+                    )
+            ) or
+
+            (
+                (length > (pos + 4)) and
+                    (stmts[pos + 1] == 'D') and (stmts[pos + 2] == 'R') and (stmts[pos + 3] == 'O') and
+                    (stmts[pos + 4] == 'P')
+        )):
+
+            yield stmts[begin..pos-1]
+            begin = pos + 1
+
+        pos = pos + 1
+
+        if length > begin:
+            if length > pos:
+                pos = stmts.find(';', pos)
+            else:
+                yield stmts[begin..length-1]
+                break
+
+            if pos < 0:
+                yield stmts[begin..length-1]
+                break
+        else:
+            break
+
+iterator splitInfluxQlStatements*(influxQlStatements: string): string =
+    for line in influxQlStatements.splitLines:
+        let semicolonPosition = line.find(';', 0)
+
+        if semicolonPosition >= 0:
+            for statement in line.splitIndividualStatements(0, semicolonPosition):
+                yield statement
+        else:
+            yield line
+
 proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool, dizcard: var HashSet[string]): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
