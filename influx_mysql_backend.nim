@@ -1,7 +1,6 @@
 import macros
 import strutils
 import tables
-import os
 
 import qt5_qtsql
 
@@ -12,25 +11,25 @@ import influx_line_protocol_to_sql
 
 type
     DBQueryException* = object of IOError
+
+    ReadLinesContextSchemaless = ref tuple
+        internedStrings: Table[string, ref string]
+        entries: Table[ref string, SQLEntryValues]
+
+    ReadLinesContextSchemaful = ref tuple
+        entryValues: seq[string]
+        inserts: Table[string, ref SQLTableInsert]
+
     ReadLinesContext* = tuple
         compressed: bool
         destroyed: bool
         line: string
         lines: string
-        internedStrings: Table[string, ref string]
-        entries: Table[ref string, SQLEntryValues]
+        schemaless: ReadLinesContextSchemaless
+        schemaful: ReadLinesContextSchemaful
 
 var dbHostname*: cstring = nil
 var dbPort*: cint = 0
-
-# sqlbuffersize sets the initial size of the SQL INSERT query buffer for POST /write commands.
-# The default size is MySQL's default max_allowed_packet value. Setting this to a higher size
-# will improve memory usage for INSERTs larger than the size, at the expense of overallocating
-# memory for INSERTs smaller than the size.
-when getEnv("sqlbuffersize") == "":
-    const SQL_BUFFER_SIZE* = 2097152
-else:
-    const SQL_BUFFER_SIZE* = getEnv("sqlbuffersize").parseInt
 
 macro useDB*(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
     # Create the try block that closes the database.
@@ -122,7 +121,10 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
                 stdout.write("/write: ")
                 stdout.writeLine(context.line)
 
-            context.line.lineProtocolToSQLEntryValues(context.entries, context.internedStrings)
+            if context.schemaful != nil:
+                context.line.lineProtocolToSQLTableInsert(context.schemaful.inserts, context.schemaful.entryValues)
+            else:
+                context.line.lineProtocolToSQLEntryValues(context.schemaless.entries, context.schemaless.internedStrings)
 
         lineStart = lineEnd + "\n".len + 1
 
@@ -134,10 +136,10 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
     else:
         context.lines.setLen(0)
 
-proc processSQLEntryValuesAndRunDBQuery*(context: var ReadLinesContext, dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
+proc processSQLEntryValuesAndRunDBQuery*(entries: var Table[ref string, SQLEntryValues], dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
     var sql = newStringOfCap(SQL_BUFFER_SIZE)
 
-    for pair in context.entries.pairs:
+    for pair in entries.pairs:
         pair.sqlEntryValuesToSQL(sql)
 
         when defined(logrequests):
@@ -147,22 +149,50 @@ proc processSQLEntryValuesAndRunDBQuery*(context: var ReadLinesContext, dbName: 
         sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
         sql.setLen(0)
 
-proc newReadLinesContext*(compressed: bool, lines: string): ReadLinesContext {.inline.} =
-    var timeInterned: ref string
-    new(timeInterned)
-    timeInterned[] = "time"
+proc processSQLTableInsertsAndRunDBQuery*(inserts: var Table[string, ref SQLTableInsert], dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
+    # Iterating over the keys is a workaround, Nim generates the wrong code in C++ mode for
+    # tables.mvalues
+    for insertKey in inserts.keys:
+        var insert = inserts[insertKey]
 
-    var internedStrings = initTable[string, ref string]()
-    internedStrings["time"] = timeInterned
+        # Add SQL statement delimiter
+        insert.sql.add(";\n")
 
-    (compressed: compressed, destroyed: false, line: "", lines: lines, internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]())
+        when defined(logrequests):
+            stdout.write("/write: ")
+            stdout.writeLine(insert.sql)
+
+        insert.sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
+
+proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): ReadLinesContext {.inline.} =
+    if schemaful:
+        var schemafulContext: ReadLinesContextSchemaful
+        new(schemafulContext)
+        schemafulContext[] = (entryValues: newSeq[string](), inserts: initTable[string, ref SQLTableInsert]())
+
+        (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext)
+    else:
+        var schemalessContext: ReadLinesContextSchemaless
+
+        var timeInterned: ref string
+        new(timeInterned)
+        timeInterned[] = "time"
+
+        var internedStrings = initTable[string, ref string]()
+        internedStrings["time"] = timeInterned
+
+        new(schemalessContext)
+        schemalessContext[] = (internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]())
+
+        (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: schemalessContext, schemaful: ReadLinesContextSchemaful(nil))
 
 proc destroyReadLinesContext*(context: var ReadLinesContext) {.inline.} =
     if not context.destroyed:
         # SQLEntryValues.entries is a manually allocated object, so we
         # need to free it.
-        for entry in context.entries.values:
-            entry.entries.removeAll
+        if context.schemaless != nil:
+            for entry in context.schemaless.entries.values:
+                entry.entries.removeAll
 
         context.destroyed = true
 

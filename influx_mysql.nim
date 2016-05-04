@@ -100,6 +100,7 @@ type
         noReadsCount: int
         readNow: string
         request: Request
+        params: StringTableRef
         retFuture: Future[ReadLinesFutureContext]
         routerResult: Future[void]
 
@@ -633,10 +634,12 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
             result.fail(newException(IOError, "Content-Encoding \"" & contentEncoding & "\" not supported!"))
             return
 
+    let params = getParams(request)
+
     var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (super: newReadLinesContext(compressed, nil), 
-        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, retFuture: result, routerResult: routerResult)
+    context[] = (super: newReadLinesContext(compressed, ("true" == params.getOrDefault("schemaful")), nil), 
+        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params, retFuture: result, routerResult: routerResult)
 
     context.super.lines = request.client.recvWholeBuffer
     context.read = context.super.lines.len
@@ -655,19 +658,20 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
 
         let context = ioResult.read
 
-        let params = getParams(context.request)
-
         if context != nil:
-            if params.hasKey("db"):
-                dbName = params["db"]
+            if context.params.hasKey("db"):
+                dbName = context.params["db"]
 
-            if params.hasKey("u"):
-                dbUsername = params["u"]
+            if context.params.hasKey("u"):
+                dbUsername = context.params["u"]
 
-            if params.hasKey("p"):
-                dbPassword = params["p"]
+            if context.params.hasKey("p"):
+                dbPassword = context.params["p"]
 
-            context.super.processSQLEntryValuesAndRunDBQuery(dbName, dbUsername, dbPassword)
+            if context.super.schemaful != nil:
+                context.super.schemaful.inserts.processSQLTableInsertsAndRunDBQuery(dbName, dbUsername, dbPassword)
+            else:
+                context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(dbName, dbUsername, dbPassword)
 
             asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 

@@ -2,6 +2,7 @@ import strutils
 import hashes as hashes
 import tables
 import strtabs
+import os
 
 import reflists
 
@@ -12,6 +13,11 @@ type
         order: OrderedTableRef[ref string, int] not nil
         entries: SinglyLinkedRefList[seq[string]] not nil
 
+    SQLTableInsert* = tuple
+        firstEntry: bool
+        order: OrderedTableRef[string, int] not nil
+        sql: string not nil
+
 when not compileOption("threads"):
     var booleanTrueValue = "TRUE"
     var booleanFalseValue = "FALSE"
@@ -21,6 +27,15 @@ when not compileOption("threads"):
 else:
     var booleanTrueValue {.threadvar.}: string
     var booleanFalseValue {.threadvar.}: string
+
+# sqlbuffersize sets the initial size of the SQL INSERT query buffer for POST /write commands.
+# The default size is MySQL's default max_allowed_packet value. Setting this to a higher size
+# will improve memory usage for INSERTs larger than the size, at the expense of overallocating
+# memory for INSERTs smaller than the size.
+when getEnv("sqlbuffersize") == "":
+    const SQL_BUFFER_SIZE* = 2097152
+else:
+    const SQL_BUFFER_SIZE* = getEnv("sqlbuffersize").parseInt
 
 template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
@@ -133,6 +148,20 @@ proc valueType(value: string): InfluxValueType =
         else:
             result = InfluxValueType.FLOAT
 
+template ensureSeqHasIndex[T](s: ref seq[T], currentLength: var int, i: int) =
+    if currentLength <= i:
+        let iLen = i + 1
+
+        s[].setLen(iLen)
+        currentLength = iLen
+
+template ensureSeqHasIndex[T](s: var seq[T], currentLength: var int, i: int) =
+    if currentLength <= i:
+        let iLen = i + 1
+
+        s.setLen(iLen)
+        currentLength = iLen
+
 proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string]) {.gcsafe.} =
     let keyAndTags = entry.getToken(' ', 0)
 
@@ -167,7 +196,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     # The length of the entry values seq is the total number of datapoints, if you will:
     # <number of tags> + <number of fields> + <one for the timestamp>
-    let entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
+    var entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
 
     var entryValues: ref seq[string]
     new(entryValues)
@@ -175,6 +204,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     let entryValuesPos = order.mgetOrPut(timeInterned, order.len)
 
+    entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
     entryValues[entryValuesPos] = newStringOfCap(timestamp.len + 14 + 29)
     entryValues[entryValuesPos].add("FROM_UNIXTIME(")
     entryValues[entryValuesPos].add(timestamp)
@@ -195,6 +225,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
         let entryValuesPos = order.mgetOrPut(tagInterned, order.len)
 
+        entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
         entryValues[entryValuesPos] = tagAndValue[tag.len+1..tagAndValue.len-1].escape("'", "'")
         shallow(entryValues[entryValuesPos])
 
@@ -215,32 +246,162 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
         of InfluxValueType.INTEGER:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos] = value[0..value.len-1]
             shallow(entryValues[entryValuesPos])
         of InfluxValueType.STRING:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos] = value.unescape.escape("'", "'")
             shallow(entryValues[entryValuesPos])
         of InfluxValueType.FLOAT:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
             shallow(value)
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(value)
             shallow(entryValues[entryValuesPos])
         of InfluxValueType.BOOLEAN_TRUE:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
             shallow(entryValues[entryValuesPos])
         of InfluxValueType.BOOLEAN_FALSE:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
             shallow(entryValues[entryValuesPos])
 
 
     result[keyInterned].entries.append(entryValues)
+
+proc newSQLTableInsert(tableName: string): SQLTableInsert {.inline.} =
+    result = (firstEntry: true, order: cast[OrderedTableRef[string, int] not nil](newOrderedTable[string, int]()),
+        sql: cast[string not nil](newStringOfCap(SQL_BUFFER_SIZE)))
+
+    result.order["time"] = result.order.len
+
+    # Add header
+    result.sql.add("INSERT INTO ")
+    result.sql.add(tableName)
+    result.sql.add(" (")
+
+proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref SQLTableInsert], entryValues: var seq[string]) {.gcsafe.} =
+    var schemaLine = false
+
+    let keyAndTags = entry.getToken(' ', 0)
+
+    let fieldsStart = keyAndTags.len + 1
+    let fields = entry.getToken(' ', fieldsStart)
+
+    let timestamp = entry.getToken(' ', fieldsStart + fields.len + 1)
+
+    var key = entry.getToken({',', ' '}, 0)
+
+    let keyAndTagsList = keyAndTags.tokens(',', key.len + 1)
+    let keyAndTagsListLen = keyAndTagsList.len
+    let fieldsList = fields.tokens(',')
+    let fieldsListLen = fieldsList.len
+
+    if not result.hasKey(key):
+        var newInsert: ref SQLTableInsert
+        new(newInsert)
+        newInsert[] = newSQLTableInsert(key)
+
+        result[key] = newInsert
+        schemaLine = true
+
+    var insert = result[key]
+    let order = insert.order
+
+    # The length of the entry values seq is the total number of datapoints, if you will:
+    # <number of tags> + <number of fields> + <one for the timestamp>
+    var entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
+
+    entryValues.setLen(0)
+    entryValues.setLen(entryValuesLen)
+
+    let entryValuesPos = order.mgetOrPut("time", order.len)
+
+    entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+    entryValues[entryValuesPos] = newStringOfCap(timestamp.len + 14 + 29)
+    entryValues[entryValuesPos].add("FROM_UNIXTIME(")
+    entryValues[entryValuesPos].add(timestamp)
+    entryValues[entryValuesPos].add("*0.000000001)")
+
+    for tagAndValue in keyAndTagsList.items:
+        let tag = tagAndValue.getToken('=', 0)
+        let entryValuesPos = order.mgetOrPut(tag, order.len)
+
+        entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+        entryValues[entryValuesPos] = tagAndValue[tag.len+1..tagAndValue.len-1].escape("'", "'")
+
+    for nameAndValue in fieldsList.items:
+        var name = nameAndValue.getToken('=', 0)
+        var value = nameAndValue[name.len+1..nameAndValue.len-1]
+
+        case value.valueType:
+        of InfluxValueType.INTEGER:
+            let entryValuesPos = order.mgetOrPut(name, order.len)
+
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+            entryValues[entryValuesPos] = value[0..value.len-1]
+        of InfluxValueType.STRING:
+            let entryValuesPos = order.mgetOrPut(name, order.len)
+
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+            entryValues[entryValuesPos] = value.unescape.escape("'", "'")
+        of InfluxValueType.FLOAT:
+            let entryValuesPos = order.mgetOrPut(name, order.len)
+
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+            entryValues[entryValuesPos].shallowCopy(value)
+        of InfluxValueType.BOOLEAN_TRUE:
+            let entryValuesPos = order.mgetOrPut(name, order.len)
+
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+            entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
+        of InfluxValueType.BOOLEAN_FALSE:
+            let entryValuesPos = order.mgetOrPut(name, order.len)
+
+            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+            entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
+
+    if not schemaLine:
+        # Add column values
+        if not insert.firstEntry:
+            insert.sql.add(",")
+        else:
+            insert.firstEntry = false
+
+        insert.sql.add("(")
+
+        for columnPos in order.values:
+            if columnPos > 0:
+                insert.sql.add(",")
+
+            if (columnPos < entryValuesLen) and (entryValues[columnPos] != nil):
+                insert.sql.add(entryValues[columnPos])
+            else:
+                insert.sql.add("NULL")
+
+        insert.sql.add(")")
+    else:
+        var first = true
+
+        # Add column names to header
+        for columnName in order.keys:
+            if not first:
+                insert.sql.add(",")
+            else:
+                first = false
+
+            insert.sql.add(columnName)
+
+        insert.sql.add(") VALUES ")
 
 proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string) =
     # Add header
@@ -249,6 +410,7 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
 
     result.add(" (")
 
+    # Add column names to header
     var first = true
     for columnName in kv.value.order.keys:
         if not first:
@@ -283,4 +445,5 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
 
         result.add(")")
 
+    # Add SQL statement delimiter
     result.add(";\n")
