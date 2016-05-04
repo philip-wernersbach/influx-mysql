@@ -314,6 +314,12 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
         result[key] = newInsert
         schemaLine = true
 
+        # Optimization: Pre-initialize the first string object, which is for
+        # the timestamp. This prevents having to reinitialize the timestamp
+        # string object on every call of this function.
+        entryValues.setLen(1)
+        entryValues[0] = newStringOfCap(timestamp.len + 14 + 29)
+
     var insert = result[key]
     let order = insert.order
 
@@ -321,13 +327,13 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
     # <number of tags> + <number of fields> + <one for the timestamp>
     var entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
 
-    entryValues.setLen(0)
+    entryValues.setLen(1)
     entryValues.setLen(entryValuesLen)
 
     let entryValuesPos = order.mgetOrPut("time", order.len)
 
     entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-    entryValues[entryValuesPos] = newStringOfCap(timestamp.len + 14 + 29)
+    entryValues[entryValuesPos].setLen(timestamp.len + 14 + 29)
     entryValues[entryValuesPos].add("FROM_UNIXTIME(")
     entryValues[entryValuesPos].add(timestamp)
     entryValues[entryValuesPos].add("*0.000000001)")
