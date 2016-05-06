@@ -220,18 +220,18 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     entry.tokenIdxsInto(bop.keyAndTagsList, ',', bop.bstring[1].len + 1, keyAndTagsLen)
     let keyAndTagsListLen = bop.keyAndTagsList.len
+
     entry.tokenIdxsInto(bop.fieldsList, ',', fieldsStart, fieldsEnd)
     let fieldsListLen = bop.fieldsList.len
 
     var keyInterned = internedStrings.getOrDefault(bop.bstring[1])
     if keyInterned == nil:
-        shallow(bop.bstring[1])
-
         new(keyInterned)
-        keyInterned[].shallowCopy(bop.bstring[1])
+        keyInterned[] = bop.bstring[1]
 
-        internedStrings[bop.bstring[1]] = keyInterned
-        bop.bstring[1] = newStringOfCap(64)
+        shallow(keyInterned[])
+
+        internedStrings[keyInterned[]] = keyInterned
 
     if not result.hasKey(keyInterned):
         result[keyInterned] = (order: cast[OrderedTableRef[ref string, int] not nil](newOrderedTable[ref string, int]()), 
@@ -264,16 +264,16 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
         var tagInterned = internedStrings.getOrDefault(bop.bstring[0])
         if tagInterned == nil:
-            shallow(bop.bstring[0])
-
             new(tagInterned)
-            tagInterned[].shallowCopy(bop.bstring[0])
+            tagInterned[] = bop.bstring[0]
 
-            internedStrings[bop.bstring[0]] = tagInterned
-            bop.bstring[0] = newStringOfCap(64)
+            shallow(tagInterned[])
+
+            internedStrings[tagInterned[]] = tagInterned
 
         let entryValuesPos = order.mgetOrPut(tagInterned, order.len)
 
+        # bop.bstring[1] = value
         entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
         entry.getTokenInto(bop.bstring[1], ',', tagAndValuePos + bstring0Len + 1, keyAndTagsLen)
 
@@ -292,54 +292,32 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
         var nameInterned = internedStrings.getOrDefault(bop.bstring[0])
         if nameInterned == nil:
-            shallow(bop.bstring[0])
-
             new(nameInterned)
-            nameInterned[].shallowCopy(bop.bstring[0])
+            nameInterned[] = bop.bstring[0]
 
-            internedStrings[bop.bstring[0]] = nameInterned
-            bop.bstring[0] = newStringOfCap(64)
+            shallow(nameInterned[])
+
+            internedStrings[nameInterned[]] = nameInterned
+
+        let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
+        entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
 
         case bop.bstring[1].valueType:
         of InfluxValueType.INTEGER:
-            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
-
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            bop.bstring[1].setLen(bop.bstring[1].len-1)
-            entryValues[entryValuesPos].shallowCopy(bop.bstring[1])
-            shallow(entryValues[entryValuesPos])
-
-            bop.bstring[1] = newStringOfCap(64)
+            entryValues[entryValuesPos] = bop.bstring[1][0..bop.bstring[1].len-2]
         of InfluxValueType.STRING:
-            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
             let bstring1Len = bop.bstring[1].len
 
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos] = newStringOfCap(bstring1Len + bstring1Len shr 2)
             bop.bstring[1].sqlReescapeInto(entryValues[entryValuesPos])
-            shallow(entryValues[entryValuesPos])
         of InfluxValueType.FLOAT:
-            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
-
-            shallow(bop.bstring[1])
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos].shallowCopy(bop.bstring[1])
-            shallow(entryValues[entryValuesPos])
-
-            bop.bstring[1] = newStringOfCap(64)
+            entryValues[entryValuesPos] = bop.bstring[1]
         of InfluxValueType.BOOLEAN_TRUE:
-            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
-
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
-            shallow(entryValues[entryValuesPos])
         of InfluxValueType.BOOLEAN_FALSE:
-            let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
-
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
-            shallow(entryValues[entryValuesPos])
 
+        shallow(entryValues[entryValuesPos])
 
     result[keyInterned].entries.append(entryValues)
 
@@ -376,6 +354,7 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
 
     entry.tokenIdxsInto(bop.keyAndTagsList, ',', bop.bstring[1].len + 1, keyAndTagsLen)
     let keyAndTagsListLen = bop.keyAndTagsList.len
+
     entry.tokenIdxsInto(bop.fieldsList, ',', fieldsStart, fieldsEnd)
     let fieldsListLen = bop.fieldsList.len
 
@@ -445,22 +424,21 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
         # bop.bstring[bop.freeBstring] = value
         entry.getTokenInto(bop.bstring[bop.freeBstring], ',', nameAndValuePos + bop.bstring[0].len + 1, fieldsEnd)
 
+        let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
+        entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
+
         case bop.bstring[bop.freeBstring].valueType:
         of InfluxValueType.INTEGER:
-            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
             let nextFreeBstring = bop.freeBstring + 1
 
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             bop.bstring[bop.freeBstring].setLen(bop.bstring[bop.freeBstring].len-1)
             entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
 
             bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
             bop.freeBstring = nextFreeBstring
         of InfluxValueType.STRING:
-            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
             let nextFreeBstring = bop.freeBstring + 1
 
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             bop.bstring[bop.freeBstring].sqlReescapeInto(bop.bstring[1])
 
             let reescapedLen = bop.bstring[1].len
@@ -472,23 +450,15 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
             bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
             bop.freeBstring = nextFreeBstring
         of InfluxValueType.FLOAT:
-            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
             let nextFreeBstring = bop.freeBstring + 1
 
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
 
             bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
             bop.freeBstring = nextFreeBstring
         of InfluxValueType.BOOLEAN_TRUE:
-            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
-
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
         of InfluxValueType.BOOLEAN_FALSE:
-            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
-
-            entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
 
     if not schemaLine:
