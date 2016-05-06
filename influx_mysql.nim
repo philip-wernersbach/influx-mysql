@@ -1,5 +1,8 @@
 {.boundChecks: on.}
 
+when defined(enabletheprofiler):
+    import nimprof
+
 import future
 import strtabs
 import strutils
@@ -296,16 +299,17 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
                 var fieldName: string = fieldNameConst.strdup
 
                 if (not dizcard.contains(fieldName)):
+                    let fieldNameLen = fieldName.len
+
                     # For strict InfluxDB compatibilty:
                     #
                     # We only return the name of the functions as the field, and not the name and the arguments.
                     #
                     # We also change "AVG" to "mean" since we change "mean" to "AVG" in the InfluxQL to SQL conversion.
-                    if fieldName[fieldName.len-1] == ')':
-                        fieldName = fieldName.getToken('(', 0)
+                    if (fieldName[fieldNameLen-1] == ')') and (fieldNameLen > 4) and
+                        (fieldName[0] == 'A') and (fieldName[1] == 'V') and (fieldName[2] == 'G') and (fieldName[3] == '('):
 
-                        if fieldName == "AVG":
-                            fieldName = "mean"
+                        fieldName = "mean"
 
                     var value = record.toJSONField(i, epoch)
 

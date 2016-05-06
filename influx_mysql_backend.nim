@@ -27,6 +27,7 @@ type
         lines: string
         schemaless: ReadLinesContextSchemaless
         schemaful: ReadLinesContextSchemaful
+        bop: LineProtocolBufferObjectPool
 
 var dbHostname*: cstring = nil
 var dbPort*: cint = 0
@@ -122,9 +123,9 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
                 stdout.writeLine(context.line)
 
             if context.schemaful != nil:
-                context.line.lineProtocolToSQLTableInsert(context.schemaful.inserts, context.schemaful.entryValues)
+                context.line.lineProtocolToSQLTableInsert(context.schemaful.inserts, context.schemaful.entryValues, context.bop)
             else:
-                context.line.lineProtocolToSQLEntryValues(context.schemaless.entries, context.schemaless.internedStrings)
+                context.line.lineProtocolToSQLEntryValues(context.schemaless.entries, context.schemaless.internedStrings, context.bop)
 
         lineStart = lineEnd + "\n".len + 1
 
@@ -170,7 +171,12 @@ proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): Rea
         new(schemafulContext)
         schemafulContext[] = (entryValues: newSeq[string](), inserts: initTable[string, ref SQLTableInsert]())
 
-        (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext)
+        result = (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext,
+            bop: (freeBstring: 2, bstring: newSeq[string](3), keyAndTagsList: newSeq[int](), fieldsList: newSeq[int]()))
+
+        result.bop.bstring[0] = newStringOfCap(64)
+        result.bop.bstring[1] = newStringOfCap(64)
+        result.bop.bstring[2] = newStringOfCap(64)
     else:
         var schemalessContext: ReadLinesContextSchemaless
 
@@ -184,7 +190,11 @@ proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): Rea
         new(schemalessContext)
         schemalessContext[] = (internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]())
 
-        (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: schemalessContext, schemaful: ReadLinesContextSchemaful(nil))
+        result = (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: schemalessContext, schemaful: ReadLinesContextSchemaful(nil),
+            bop: (freeBstring: 1, bstring: newSeq[string](2), keyAndTagsList: newSeq[int](), fieldsList: newSeq[int]()))
+
+        result.bop.bstring[0] = newStringOfCap(64)
+        result.bop.bstring[1] = newStringOfCap(64)
 
 proc destroyReadLinesContext*(context: var ReadLinesContext) {.inline.} =
     if not context.destroyed:

@@ -4,9 +4,12 @@ import tables
 import strtabs
 import os
 
+import stdlib_extra
 import reflists
 
 #const QUERY_LANG_LEN = "INSERT INTO  (  ) VALUES (  );".len
+
+const MYSQL_BIGINT_CHAR_LEN* = 20
 
 type
     SQLEntryValues* = tuple
@@ -17,6 +20,12 @@ type
         firstEntry: bool
         order: OrderedTableRef[string, int] not nil
         sql: string not nil
+
+    LineProtocolBufferObjectPool* = tuple
+        freeBstring: int
+        bstring: seq[string]
+        keyAndTagsList: seq[int]
+        fieldsList: seq[int]
 
 when not compileOption("threads"):
     var booleanTrueValue = "TRUE"
@@ -50,11 +59,15 @@ when compileOption("threads"):
             booleanFalseValue = "FALSE"
             shallow(booleanFalseValue)
 
-proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
-    let entryLen = entry.len
-
+proc getTokenInto*(entry: string, result: var string, tokenEnd: set[char], start: int, stop = -1) =
     var escaped = false
     var quoted = false
+
+    let entryLen = if stop >= 0:
+            stop
+        else:
+            entry.len
+
     for i in countUp(start, entryLen - 1):
         if not quoted:
             if not escaped:
@@ -63,20 +76,31 @@ proc getToken*(entry: string, tokenEnd: set[char], start: int): string =
                 elif entry[i] == '"':
                     quoted = true
                 elif entry[i] in tokenEnd:
-                    result = entry[start..i-1]
+                    let resultLen = i - start
+
+                    result.setLen(resultLen)
+                    copyMem(addr(result[0]), unsafeAddr(entry[start]), resultLen)
+
                     return
             else:
                 escaped = false
         elif entry[i] == '"':
             quoted = false
 
-    result = entry[start..entryLen-1]
+    let resultLen = entryLen - start
 
-proc getTokenLen*(entry: string, tokenEnd: set[char], start: int): int =
-    let entryLen = entry.len
+    result.setLen(resultLen)
+    copyMem(addr(result[0]), unsafeAddr(entry[start]), resultLen)
 
+proc getTokenLen*(entry: string, tokenEnd: set[char], start: int, stop = -1): int =
     var escaped = false
     var quoted = false
+
+    let entryLen = if stop >= 0:
+            stop
+        else:
+            entry.len
+
     for i in countUp(start, entryLen - 1):
         if not quoted:
             if not escaped:
@@ -94,30 +118,34 @@ proc getTokenLen*(entry: string, tokenEnd: set[char], start: int): int =
 
     result = entryLen - start
 
-template getToken*(entry: string, tokenEnd: char, start: int): string =
-    entry.getToken({tokenEnd}, start)
+template getTokenInto*(entry: string, result: var string, tokenEnd: char, start: int, stop = -1) =
+    entry.getTokenInto(result, {tokenEnd}, start, stop)
 
-template getTokenLen*(entry: string, tokenEnd: char, start: int): int =
-    entry.getTokenLen({tokenEnd}, start)
+template getTokenLen*(entry: string, tokenEnd: char, start: int, stop = -1): int =
+    entry.getTokenLen({tokenEnd}, start, stop)
 
-proc tokens(entry: string, tokenEnd: char, start = 0): seq[string] =
-    let entryLen = entry.len
+proc tokenIdxsInto(entry: string, result: var seq[int], tokenEnd: char, start = 0, stop = -1) =
     var i = start
     var tokensLen = 0
+
+    let entryLen = if stop >= 0:
+            stop
+        else:
+            entry.len
     
     # Iterate once to find out how many tokens there are in the string
     while i < entryLen:
-        i += entry.getTokenLen(tokenEnd, i) + 1
+        i += entry.getTokenLen(tokenEnd, i, entryLen) + 1
         tokensLen += 1
 
     i = start
-    result = newSeq[string](tokensLen)
+    result.setLen(tokensLen)
 
     # Iterate again to build the result.
     for pos in countUp(0, tokensLen-1):
-        result[pos] = entry.getToken(tokenEnd, i)
+        result[pos] = i
 
-        i += result[pos].len + 1
+        i += entry.getTokenLen(tokenEnd, i, entryLen) + 1
 
 type
     InfluxValueType {.pure.} = enum
@@ -162,31 +190,48 @@ template ensureSeqHasIndex[T](s: var seq[T], currentLength: var int, i: int) =
         s.setLen(iLen)
         currentLength = iLen
 
-proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string]) {.gcsafe.} =
-    let keyAndTags = entry.getToken(' ', 0)
+template ensureSeqHasIndexAndString(s: var seq[string], currentLength: var int, i: int) =
+    if currentLength <= i:
+        let iLen = i + 1
 
-    let fieldsStart = keyAndTags.len + 1
-    let fields = entry.getToken(' ', fieldsStart)
+        s.setLen(iLen)
 
-    let timestamp = entry.getToken(' ', fieldsStart + fields.len + 1)
+        for pos in countUp(currentLength, i):
+            s[pos] = newStringOfCap(64)
 
-    var key = entry.getToken({',', ' '}, 0)
+        currentLength = iLen
+
+proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, SQLEntryValues], internedStrings: var Table[string, ref string],
+        bop: var LineProtocolBufferObjectPool) {.gcsafe.} =
+
+    let keyAndTagsLen = entry.getTokenLen(' ', 0)
+
+    let fieldsStart = keyAndTagsLen + 1
+    let fieldsLen = entry.getTokenLen(' ', fieldsStart)
+    let fieldsEnd = fieldsStart + fieldsLen
+
+    # bop.bstring[0] = timestamp
+    entry.getTokenInto(bop.bstring[0], ' ', fieldsEnd + 1)
+
+    # bop.bstring[1] = key
+    entry.getTokenInto(bop.bstring[1], {',', ' '}, 0)
 
     let timeInterned = internedStrings["time"]
 
-    let keyAndTagsList = keyAndTags.tokens(',', key.len + 1)
-    let keyAndTagsListLen = keyAndTagsList.len
-    let fieldsList = fields.tokens(',')
-    let fieldsListLen = fieldsList.len
+    entry.tokenIdxsInto(bop.keyAndTagsList, ',', bop.bstring[1].len + 1, keyAndTagsLen)
+    let keyAndTagsListLen = bop.keyAndTagsList.len
+    entry.tokenIdxsInto(bop.fieldsList, ',', fieldsStart, fieldsEnd)
+    let fieldsListLen = bop.fieldsList.len
 
-    var keyInterned = internedStrings.getOrDefault(key)
+    var keyInterned = internedStrings.getOrDefault(bop.bstring[1])
     if keyInterned == nil:
-        shallow(key)
+        shallow(bop.bstring[1])
 
         new(keyInterned)
-        keyInterned[].shallowCopy(key)
+        keyInterned[].shallowCopy(bop.bstring[1])
 
-        internedStrings[key] = keyInterned
+        internedStrings[bop.bstring[1]] = keyInterned
+        bop.bstring[1] = newStringOfCap(64)
 
     if not result.hasKey(keyInterned):
         result[keyInterned] = (order: cast[OrderedTableRef[ref string, int] not nil](newOrderedTable[ref string, int]()), 
@@ -205,63 +250,83 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
     let entryValuesPos = order.mgetOrPut(timeInterned, order.len)
 
     entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-    entryValues[entryValuesPos] = newStringOfCap(timestamp.len + 14 + 29)
+    entryValues[entryValuesPos] = newStringOfCap(bop.bstring[0].len + 14 + 29)
     entryValues[entryValuesPos].add("FROM_UNIXTIME(")
-    entryValues[entryValuesPos].add(timestamp)
+    entryValues[entryValuesPos].add(bop.bstring[0])
     entryValues[entryValuesPos].add("*0.000000001)")
     shallow(entryValues[entryValuesPos])
 
-    for tagAndValue in keyAndTagsList.items:
-        var tag = tagAndValue.getToken('=', 0)
+    for tagAndValuePos in bop.keyAndTagsList.items:
+        # bop.bstring[0] = tag
+        entry.getTokenInto(bop.bstring[0], '=', tagAndValuePos, keyAndTagsLen)
 
-        var tagInterned = internedStrings.getOrDefault(tag)
+        let bstring0Len = bop.bstring[0].len
+
+        var tagInterned = internedStrings.getOrDefault(bop.bstring[0])
         if tagInterned == nil:
-            shallow(tag)
+            shallow(bop.bstring[0])
 
             new(tagInterned)
-            tagInterned[].shallowCopy(tag)
+            tagInterned[].shallowCopy(bop.bstring[0])
 
-            internedStrings[tag] = tagInterned
+            internedStrings[bop.bstring[0]] = tagInterned
+            bop.bstring[0] = newStringOfCap(64)
 
         let entryValuesPos = order.mgetOrPut(tagInterned, order.len)
 
         entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-        entryValues[entryValuesPos] = tagAndValue[tag.len+1..tagAndValue.len-1].escape("'", "'")
+        entry.getTokenInto(bop.bstring[1], ',', tagAndValuePos + bstring0Len + 1, keyAndTagsLen)
+
+        let bstring1Len = bop.bstring[1].len
+
+        entryValues[entryValuesPos] = newStringOfCap(bstring1Len + bstring1Len shr 2)
+        bop.bstring[1].sqlEscapeInto(entryValues[entryValuesPos])
         shallow(entryValues[entryValuesPos])
 
-    for nameAndValue in fieldsList.items:
-        var name = nameAndValue.getToken('=', 0)
-        var value = nameAndValue[name.len+1..nameAndValue.len-1]
+    for nameAndValuePos in bop.fieldsList.items:
+        # bop.bstring[0] = name
+        entry.getTokenInto(bop.bstring[0], '=', nameAndValuePos, fieldsEnd)
 
-        var nameInterned = internedStrings.getOrDefault(name)
+        # bop.bstring[1] = value
+        entry.getTokenInto(bop.bstring[1], ',', nameAndValuePos + bop.bstring[0].len + 1, fieldsEnd)
+
+        var nameInterned = internedStrings.getOrDefault(bop.bstring[0])
         if nameInterned == nil:
-            shallow(name)
+            shallow(bop.bstring[0])
 
             new(nameInterned)
-            nameInterned[].shallowCopy(name)
+            nameInterned[].shallowCopy(bop.bstring[0])
 
-            internedStrings[name] = nameInterned
+            internedStrings[bop.bstring[0]] = nameInterned
+            bop.bstring[0] = newStringOfCap(64)
 
-        case value.valueType:
+        case bop.bstring[1].valueType:
         of InfluxValueType.INTEGER:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos] = value[0..value.len-1]
+            bop.bstring[1].setLen(bop.bstring[1].len-1)
+            entryValues[entryValuesPos].shallowCopy(bop.bstring[1])
             shallow(entryValues[entryValuesPos])
+
+            bop.bstring[1] = newStringOfCap(64)
         of InfluxValueType.STRING:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
+            let bstring1Len = bop.bstring[1].len
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos] = value.unescape.escape("'", "'")
+            entryValues[entryValuesPos] = newStringOfCap(bstring1Len + bstring1Len shr 2)
+            bop.bstring[1].sqlReescapeInto(entryValues[entryValuesPos])
             shallow(entryValues[entryValuesPos])
         of InfluxValueType.FLOAT:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
-            shallow(value)
+            shallow(bop.bstring[1])
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos].shallowCopy(value)
+            entryValues[entryValuesPos].shallowCopy(bop.bstring[1])
             shallow(entryValues[entryValuesPos])
+
+            bop.bstring[1] = newStringOfCap(64)
         of InfluxValueType.BOOLEAN_TRUE:
             let entryValuesPos = order.mgetOrPut(nameInterned, order.len)
 
@@ -289,38 +354,48 @@ proc newSQLTableInsert(tableName: string): SQLTableInsert {.inline.} =
     result.sql.add(tableName)
     result.sql.add(" (")
 
-proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref SQLTableInsert], entryValues: var seq[string]) {.gcsafe.} =
+proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref SQLTableInsert], entryValues: var seq[string],
+    bop: var LineProtocolBufferObjectPool) {.gcsafe.} =
+
     var schemaLine = false
+    var bstringSeqLen = bop.bstring.len
 
-    let keyAndTags = entry.getToken(' ', 0)
+    let keyAndTagsLen = entry.getTokenLen(' ', 0)
 
-    let fieldsStart = keyAndTags.len + 1
-    let fields = entry.getToken(' ', fieldsStart)
+    let fieldsStart = keyAndTagsLen + 1
+    let fieldsLen = entry.getTokenLen(' ', fieldsStart)
+    let fieldsEnd = fieldsStart + fieldsLen
 
-    let timestamp = entry.getToken(' ', fieldsStart + fields.len + 1)
+    bop.freeBstring = 2
 
-    var key = entry.getToken({',', ' '}, 0)
+    # bop.bstring[0] = timestamp
+    entry.getTokenInto(bop.bstring[0], ' ', fieldsEnd + 1)
 
-    let keyAndTagsList = keyAndTags.tokens(',', key.len + 1)
-    let keyAndTagsListLen = keyAndTagsList.len
-    let fieldsList = fields.tokens(',')
-    let fieldsListLen = fieldsList.len
+    # bop.bstring[1] = key
+    entry.getTokenInto(bop.bstring[1], {',', ' '}, 0)
 
-    if not result.hasKey(key):
+    entry.tokenIdxsInto(bop.keyAndTagsList, ',', bop.bstring[1].len + 1, keyAndTagsLen)
+    let keyAndTagsListLen = bop.keyAndTagsList.len
+    entry.tokenIdxsInto(bop.fieldsList, ',', fieldsStart, fieldsEnd)
+    let fieldsListLen = bop.fieldsList.len
+
+    if not result.hasKey(bop.bstring[1]):
         var newInsert: ref SQLTableInsert
         new(newInsert)
-        newInsert[] = newSQLTableInsert(key)
+        newInsert[] = newSQLTableInsert(bop.bstring[1])
 
-        result[key] = newInsert
+        result[bop.bstring[1]] = newInsert
         schemaLine = true
 
+        # TODO: Optimize this out
         # Optimization: Pre-initialize the first string object, which is for
         # the timestamp. This prevents having to reinitialize the timestamp
         # string object on every call of this function.
         entryValues.setLen(1)
-        entryValues[0] = newStringOfCap(timestamp.len + 14 + 29)
+        entryValues[0] = newStringOfCap(bop.bstring[0].len + 14 + 29)
+        ###
 
-    var insert = result[key]
+    var insert = result[bop.bstring[1]]
     let order = insert.order
 
     # The length of the entry values seq is the total number of datapoints, if you will:
@@ -333,45 +408,85 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
     let entryValuesPos = order.mgetOrPut("time", order.len)
 
     entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-    entryValues[entryValuesPos].setLen(timestamp.len + 14 + 29)
+
+    # TODO: Optimize this out
+    entryValues[entryValuesPos].setLen(bop.bstring[0].len + 14 + 29)
+    entryValues[entryValuesPos].setLen(0)
+    ###
+
     entryValues[entryValuesPos].add("FROM_UNIXTIME(")
-    entryValues[entryValuesPos].add(timestamp)
+    entryValues[entryValuesPos].add(bop.bstring[0])
     entryValues[entryValuesPos].add("*0.000000001)")
 
-    for tagAndValue in keyAndTagsList.items:
-        let tag = tagAndValue.getToken('=', 0)
-        let entryValuesPos = order.mgetOrPut(tag, order.len)
+    for tagAndValuePos in bop.keyAndTagsList.items:
+        let nextFreeBstring = bop.freeBstring + 1
+
+        # bop.bstring[0] = tag
+        entry.getTokenInto(bop.bstring[0], '=', tagAndValuePos, keyAndTagsLen)
+
+        let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
 
         entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-        entryValues[entryValuesPos] = tagAndValue[tag.len+1..tagAndValue.len-1].escape("'", "'")
 
-    for nameAndValue in fieldsList.items:
-        var name = nameAndValue.getToken('=', 0)
-        var value = nameAndValue[name.len+1..nameAndValue.len-1]
+        # bop.bstring[1] = unescaped value
+        entry.getTokenInto(bop.bstring[1], ',', tagAndValuePos + bop.bstring[0].len + 1, keyAndTagsLen)
+        
+        # bop.bstring[bop.freeBstring] = escaped value
+        bop.bstring[1].sqlEscapeInto(bop.bstring[bop.freeBstring])
+        entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
 
-        case value.valueType:
+        bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
+        bop.freeBstring = nextFreeBstring
+
+    for nameAndValuePos in bop.fieldsList.items:
+        # bop.bstring[0] = name
+        entry.getTokenInto(bop.bstring[0], '=', nameAndValuePos, fieldsEnd)
+
+        # bop.bstring[bop.freeBstring] = value
+        entry.getTokenInto(bop.bstring[bop.freeBstring], ',', nameAndValuePos + bop.bstring[0].len + 1, fieldsEnd)
+
+        case bop.bstring[bop.freeBstring].valueType:
         of InfluxValueType.INTEGER:
-            let entryValuesPos = order.mgetOrPut(name, order.len)
+            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
+            let nextFreeBstring = bop.freeBstring + 1
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos] = value[0..value.len-1]
+            bop.bstring[bop.freeBstring].setLen(bop.bstring[bop.freeBstring].len-1)
+            entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
+
+            bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
+            bop.freeBstring = nextFreeBstring
         of InfluxValueType.STRING:
-            let entryValuesPos = order.mgetOrPut(name, order.len)
+            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
+            let nextFreeBstring = bop.freeBstring + 1
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos] = value.unescape.escape("'", "'")
+            bop.bstring[bop.freeBstring].sqlReescapeInto(bop.bstring[1])
+
+            let reescapedLen = bop.bstring[1].len
+
+            bop.bstring[bop.freeBstring].setLen(reescapedLen)
+            entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
+            copyMem(addr(entryValues[entryValuesPos][0]), addr(bop.bstring[1][0]), reescapedLen)
+
+            bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
+            bop.freeBstring = nextFreeBstring
         of InfluxValueType.FLOAT:
-            let entryValuesPos = order.mgetOrPut(name, order.len)
+            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
+            let nextFreeBstring = bop.freeBstring + 1
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
-            entryValues[entryValuesPos].shallowCopy(value)
+            entryValues[entryValuesPos].shallowCopy(bop.bstring[bop.freeBstring])
+
+            bop.bstring.ensureSeqHasIndexAndString(bstringSeqLen, nextFreeBstring)
+            bop.freeBstring = nextFreeBstring
         of InfluxValueType.BOOLEAN_TRUE:
-            let entryValuesPos = order.mgetOrPut(name, order.len)
+            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanTrueValue)
         of InfluxValueType.BOOLEAN_FALSE:
-            let entryValuesPos = order.mgetOrPut(name, order.len)
+            let entryValuesPos = order.mgetOrPut(bop.bstring[0], order.len)
 
             entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
             entryValues[entryValuesPos].shallowCopy(booleanFalseValue)
