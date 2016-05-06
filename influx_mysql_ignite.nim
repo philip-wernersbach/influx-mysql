@@ -100,7 +100,7 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
     var i = 0
 
     let oldThreadsLen = parallelContext.threadsSpawned
-    parallelContext.entriesLen = context.entries.len
+    parallelContext.entriesLen = context.schemaless.entries.len
 
     if parallelContext.entriesLen > oldThreadsLen:
         let sqlCap = SQL_BUFFER_SIZE div parallelContext.entriesLen
@@ -114,7 +114,7 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
 
         parallelContext.threadsSpawned = parallelContext.entriesLen
 
-    for pair in context.entries.pairs:
+    for pair in context.schemaless.entries.pairs:
         pair.sqlEntryValuesToSQL(parallelContext.sql[i]) 
 
         when defined(logrequests):
@@ -173,7 +173,7 @@ proc compressedBatchPointsProcessor() =
             try:
                 snappy.uncompressInto(cast[cstring](clpArray), parallelContext.lineProtocol, clpLen)
 
-                context = newReadLinesContext(false, nil)
+                context = newReadLinesContext(false, false, nil)
                 context.lines.shallowCopy(parallelContext.lineProtocol)
             finally:
                 currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
