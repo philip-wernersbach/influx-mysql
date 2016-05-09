@@ -103,30 +103,41 @@ proc compress*(input:string):string =
   output.setLen(output_length)
   result = output
 
-proc uncompressInto*(input: cstring, result: var string, inputLen: int) =
-  ## Uncompress a string. The input string has to be
-  ## a string compressed by `snappy`
+proc validateAndGetUncompressedLength*(input: cstring, inputLen: int): int =
   let can_uncompress = snappy_validate_compressed_buffer(input, inputLen)
   if can_uncompress != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,
                        "Malformed compressed input: " & $can_uncompress)
   
-  var
-    output_length:int = 0
-    status = snappy_uncompressed_length(input,
+  result = 0
+  var status = snappy_uncompressed_length(input,
                                         inputLen,
-                                        addr output_length)
+                                        addr result)
+
   if status != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,$status)
 
-  result.setLen(output_length)
-  status = snappy_uncompress(input,
+proc uncompressValidatedInputInto*(input: cstring, result: var string, inputLen: int, output_length: var int, outputOffset = int(0)) =
+  ## Uncompress a string. The input string has to be
+  ## a string compressed by `snappy`.
+  ## This does not do validation. Use `validateAndGetUncompressedLength`
+  ## to validate the input beforehand.
+  result.setLen(outputOffset + output_length)
+  var status = snappy_uncompress(input,
                              inputLen,
-                             result,
+                             addr(result[outputOffset]),
                              addr output_length)
 
+  result.setLen(outputOffset + outputLength)
+
   if status != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,$status)
+
+proc uncompressInto*(input: cstring, result: var string, inputLen: int) =
+  ## Uncompress a string. The input string has to be
+  ## a string compressed by `snappy`
+  var output_length = validateAndGetUncompressedLength(input, inputLen)
+  uncompressValidatedInputInto(input, result, inputLen, output_length)
   
 proc uncompress*(input: cstring, inputLen: int): string =
     result = ""

@@ -64,6 +64,7 @@ jnimport:
     proc getUsername(obj: CompressedBatchPoints): jstring
     proc getPassword(obj: CompressedBatchPoints): jstring
     proc getDatabase(obj: CompressedBatchPoints): jstring
+    proc compressedSchemaLineProtocol(obj: CompressedBatchPoints): jByteArray
     proc compressedLineProtocol(obj: CompressedBatchPoints): jByteArray
 
 template PushLocalFrame*(env: JNIEnvPtr, capacity: jint) =
@@ -72,7 +73,7 @@ template PushLocalFrame*(env: JNIEnvPtr, capacity: jint) =
 
 iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBatchPoints {.inline.} =
     while true:
-        currentEnv.PushLocalFrame(5)
+        currentEnv.PushLocalFrame(7)
 
         try:
             yield queue.take
@@ -100,26 +101,22 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
     var i = 0
 
     let oldThreadsLen = parallelContext.threadsSpawned
-    parallelContext.entriesLen = context.schemaless.entries.len
+    parallelContext.entriesLen = context.schemaful.inserts.len
 
     if parallelContext.entriesLen > oldThreadsLen:
-        let sqlCap = SQL_BUFFER_SIZE div parallelContext.entriesLen
-
         for i in oldThreadsLen..parallelContext.entriesLen-1:
-            parallelContext.sql[i] = newStringOfCap(sqlCap)
-            
             threadInputs[i].open
             threadOutputs[i].open
             threads[i].createThread(runDBQueryWithTransaction, i)
 
         parallelContext.threadsSpawned = parallelContext.entriesLen
 
-    for pair in context.schemaless.entries.pairs:
-        pair.sqlEntryValuesToSQL(parallelContext.sql[i]) 
+    for sqlInsert in context.schemaful.inserts.values:
+        parallelContext.sql[i].shallowCopy(sqlInsert.sql)
 
         when defined(logrequests):
             stdout.write("/write: ")
-            stdout.writeLine(sql[i])
+            stdout.writeLine(parallelContext.sql[i])
 
         threadInputsData[i] = (dbName: dbName, dbUsername: dbUsername, dbPassword: dbPassword, sql: cstring(addr(parallelContext.sql[i][0])))
         threadInputs[i].send(true)
@@ -129,7 +126,7 @@ proc ensureParallelExecutionsCompleted(parallelContext: var ParallelExecutionCon
     if parallelContext.hasLast:
         for i in 0..parallelContext.entriesLen-1:
             if threadOutputs[i].recv:
-                parallelContext.sql[i].setLen(0)
+                parallelContext.sql[i] = nil
             else:
                 raise newException(ParallelExecutionException, "Thread " & $i & "'s execution did not complete correctly!")
 
@@ -158,25 +155,36 @@ proc compressedBatchPointsProcessor() =
 
             var context: ReadLinesContext
 
+            let cslpObj = points.compressedSchemaLineProtocol
+            let cslpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](cslpObj))
+
             let clpObj = points.compressedLineProtocol
             let clpLen = currentEnv.GetArrayLength(currentEnv, cast[jarray](clpObj))
 
-            if clpLen < 1:
+            if (cslpLen < 1) or (clpLen < 1):
                 # Wait until last process is done.
                 parallelContext.ensureParallelExecutionsCompleted
 
                 parallelContext.hasLast = false
                 return
 
+            let cslpArray = currentEnv.GetByteArrayElements(currentEnv, cslpObj, nil)
             let clpArray = currentEnv.GetByteArrayElements(currentEnv, clpObj, nil)
 
             try:
-                snappy.uncompressInto(cast[cstring](clpArray), parallelContext.lineProtocol, clpLen)
+                var cslpUncompressedLen = snappy.validateAndGetUncompressedLength(cast[cstring](cslpArray), cslpLen)
+                var clpUncompressedLen = snappy.validateAndGetUncompressedLength(cast[cstring](clpArray), clpLen)
 
-                context = newReadLinesContext(false, false, nil)
+                parallelContext.lineProtocol.setLen(cslpUncompressedLen + clpUncompressedLen)
+
+                snappy.uncompressValidatedInputInto(cast[cstring](cslpArray), parallelContext.lineProtocol, cslpLen, cslpUncompressedLen, 0)
+                snappy.uncompressValidatedInputInto(cast[cstring](clpArray), parallelContext.lineProtocol, clpLen, clpUncompressedLen, cslpUncompressedLen)
+
+                context = newReadLinesContext(false, true, nil)
                 context.lines.shallowCopy(parallelContext.lineProtocol)
             finally:
                 currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)
+                currentEnv.ReleaseByteArrayElements(currentEnv, cslpObj, cslpArray, JNI_ABORT)
 
             try:
                 GC_disable()
