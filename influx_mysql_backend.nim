@@ -156,8 +156,7 @@ proc processSQLTableInsertsAndRunDBQuery*(inserts: var Table[string, ref SQLTabl
     for insertKey in inserts.keys:
         var insert = inserts[insertKey]
 
-        # Add SQL statement delimiter
-        insert.sql.add(";\n")
+        insert.sql.addSQLStatementDelimiter
 
         when defined(logrequests):
             stdout.write("/write: ")

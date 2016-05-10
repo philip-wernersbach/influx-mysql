@@ -514,6 +514,10 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
 
         insert.sql.add(") VALUES ")
 
+template addSQLStatementDelimiter*(result: var string) =
+    # Add SQL statement delimiter
+    result.add(";\n")
+
 proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string) =
     # Add header
     result.add("INSERT INTO ")
@@ -556,5 +560,4 @@ proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], res
 
         result.add(")")
 
-    # Add SQL statement delimiter
-    result.add(";\n")
+    result.addSQLStatementDelimiter

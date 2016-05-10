@@ -112,6 +112,7 @@ proc processSQLEntryValuesAndRunDBQueryParallel(context: var ReadLinesContext, d
         parallelContext.threadsSpawned = parallelContext.entriesLen
 
     for sqlInsert in context.schemaful.inserts.values:
+        sqlInsert.sql.addSQLStatementDelimiter
         parallelContext.sql[i].shallowCopy(sqlInsert.sql)
 
         when defined(logrequests):
