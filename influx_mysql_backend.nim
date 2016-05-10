@@ -168,11 +168,12 @@ proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): Rea
     if schemaful:
         var schemafulContext: ReadLinesContextSchemaful
         new(schemafulContext)
-        schemafulContext[] = (entryValues: newSeq[string](), inserts: initTable[string, ref SQLTableInsert]())
+        schemafulContext[] = (entryValues: newSeq[string](1), inserts: initTable[string, ref SQLTableInsert]())
 
         result = (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext,
             bop: (freeBstring: 2, bstring: newSeq[string](3), keyAndTagsList: newSeq[int](), fieldsList: newSeq[int]()))
 
+        result.schemaful.entryValues[0] = newStringOfCap(64)
         result.bop.bstring[0] = newStringOfCap(64)
         result.bop.bstring[1] = newStringOfCap(64)
         result.bop.bstring[2] = newStringOfCap(64)

@@ -386,33 +386,25 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
         result[bop.bstring[1]] = newInsert
         schemaLine = true
 
-        # TODO: Optimize this out
-        # Optimization: Pre-initialize the first string object, which is for
-        # the timestamp. This prevents having to reinitialize the timestamp
-        # string object on every call of this function.
-        entryValues.setLen(1)
-        entryValues[0] = newStringOfCap(bop.bstring[0].len + 14 + 29)
-        ###
-
     var insert = result[bop.bstring[1]]
     let order = insert.order
 
     # The length of the entry values seq is the total number of datapoints, if you will:
     # <number of tags> + <number of fields> + <one for the timestamp>
+    #
+    # We set the length of entryValues to one before setting it to the real length in
+    # order to set the other indexes of entryValues to nil.
     var entryValuesLen = max(keyAndTagsListLen + fieldsListLen + 1, order.len)
-
     entryValues.setLen(1)
     entryValues.setLen(entryValuesLen)
 
     let entryValuesPos = order.mgetOrPut("time", order.len)
-
     entryValues.ensureSeqHasIndex(entryValuesLen, entryValuesPos)
 
-    # TODO: Optimize this out
-    entryValues[entryValuesPos].setLen(bop.bstring[0].len + 14 + 29)
+    # The length of the "time" object is already set to the maximum possible, given MySQL's
+    # range restrictions on BIGINTs. So we just set the length to zero without pre-allocating
+    # first.
     entryValues[entryValuesPos].setLen(0)
-    ###
-
     entryValues[entryValuesPos].add("FROM_UNIXTIME(")
     entryValues[entryValuesPos].add(bop.bstring[0])
     entryValues[entryValuesPos].add("*0.000000001)")
