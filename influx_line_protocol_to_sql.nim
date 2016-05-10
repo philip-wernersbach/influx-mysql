@@ -37,14 +37,34 @@ else:
     var booleanTrueValue {.threadvar.}: string
     var booleanFalseValue {.threadvar.}: string
 
-# sqlbuffersize sets the initial size of the SQL INSERT query buffer for POST /write commands.
-# The default size is MySQL's default max_allowed_packet value. Setting this to a higher size
-# will improve memory usage for INSERTs larger than the size, at the expense of overallocating
-# memory for INSERTs smaller than the size.
+const MYSQL_DEFAULT_MAX_ALLOWED_PACKET = 2097152
+
+# sqlbuffersize sets the initial size of the SQL INSERT query buffer for schemaless
+# POST /write commands.
+#
+# Only one SQL INSERT query buffer of this size is allocated per POST /write command.
+#
+# The default size is MySQL's default max_allowed_packet value. Setting this to a higher
+# size will improve memory usage for INSERTs larger than the size, at the expense of
+# overallocating memory for INSERTs smaller than the size.
 when getEnv("sqlbuffersize") == "":
-    const SQL_BUFFER_SIZE* = 2097152
+    const SQL_BUFFER_SIZE* = MYSQL_DEFAULT_MAX_ALLOWED_PACKET
 else:
     const SQL_BUFFER_SIZE* = getEnv("sqlbuffersize").parseInt
+
+# schemafulsqlbuffersize sets the initial size of the SQL INSERT query buffer for
+# schemaful POST /write commands.
+#
+# Each measurement in a POST /write command will be allocated its own SQL INSERT query
+# buffer of this size. So the size of the allocated SQL INSERT query buffers will be
+# SCHEMAFUL_SQL_BUFFER_SIZE * (number of measurements in POST /write command).
+#
+# The tuning tradeoffs of SCHEMAFUL_SQL_BUFFER_SIZE are the same as the ones for
+# SQL_BUFFER_SIZE.
+when getEnv("schemafulsqlbuffersize") == "":
+    const SCHEMAFUL_SQL_BUFFER_SIZE* = MYSQL_DEFAULT_MAX_ALLOWED_PACKET
+else:
+    const SCHEMAFUL_SQL_BUFFER_SIZE* = getEnv("schemafulsqlbuffersize").parseInt
 
 template hash(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
@@ -323,7 +343,7 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
 proc newSQLTableInsert(tableName: string): SQLTableInsert {.inline.} =
     result = (firstEntry: true, order: cast[OrderedTableRef[string, int] not nil](newOrderedTable[string, int]()),
-        sql: cast[string not nil](newStringOfCap(SQL_BUFFER_SIZE)))
+        sql: cast[string not nil](newStringOfCap(SCHEMAFUL_SQL_BUFFER_SIZE)))
 
     result.order["time"] = result.order.len
 
