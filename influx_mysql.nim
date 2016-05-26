@@ -153,30 +153,34 @@ proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
     result.kind = JSONFieldKind.String
     result.stringVal = timeStringConst.strdup
 
-proc toJSONField(dateTime: QDateTimeObj, epoch: EpochFormat): JSONField =
+proc toJSONField(dateTime: QDateTimeObj, period: uint64, epoch: EpochFormat): JSONField =
     case epoch:
     of EpochFormat.RFC3339:
-        result = dateTime.toRFC3339JSONField
+        if period != 1:
+            let dateTimeBinned = newQDateTimeObj(qint64((uint64(dateTime.toMSecsSinceEpoch) div period) * period), QtUtc)
+            result = dateTimeBinned.toRFC3339JSONField
+        else:
+            result = dateTime.toRFC3339JSONField
     of EpochFormat.Hour:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 3600000
+        result.uintVal = ((uint64(dateTime.toMSecsSinceEpoch) div period) * period) div 3600000
     of EpochFormat.Minute:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 60000
+        result.uintVal = ((uint64(dateTime.toMSecsSinceEpoch) div period) * period) div 60000
     of EpochFormat.Second:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) div 1000
+        result.uintVal = ((uint64(dateTime.toMSecsSinceEpoch) div period) * period) div 1000
     of EpochFormat.Millisecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch)
+        result.uintVal = (uint64(dateTime.toMSecsSinceEpoch) div period) * period
     of EpochFormat.Microsecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) * 1000
+        result.uintVal = ((uint64(dateTime.toMSecsSinceEpoch) div period) * period) * 1000
     of EpochFormat.Nanosecond:
         result.kind = JSONFieldKind.UInteger
-        result.uintVal = uint64(dateTime.toMSecsSinceEpoch) * 1000000
+        result.uintVal = ((uint64(dateTime.toMSecsSinceEpoch) div period) * period) * 1000000
 
-proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField =
+proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFormat): JSONField =
     if not record.isNull(i):
         var valueVariant = record.value(i)
 
@@ -185,7 +189,7 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
             var dateTime = valueVariant.toQDateTimeObj
             dateTime.setTimeSpec(QtUtc)
 
-            result = dateTime.toJSONField(epoch)
+            result = dateTime.toJSONField(period, epoch)
 
         of QVariantType.Bool:
 
@@ -223,7 +227,7 @@ proc toJSONField(record: QSqlRecordObj, i: cint, epoch: EpochFormat): JSONField 
         result.kind = JSONFieldKind.Null
 
 proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
-                lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, internedStrings: var Table[string, ref string]) =
+                lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
 
     var lastTime = lastTime
     let epochResolution = case epoch:
@@ -235,8 +239,6 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
             uint64(1000)
         else:
             uint64(1)
-
-    let timeInterned = internedStrings["time"]
 
     if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 1:
         while true:
@@ -251,13 +253,15 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
                 if fieldName != timeInterned:
                     entryValues[fieldName] = JSONField(kind: JSONFieldKind.Null)
                 else:
-                    entryValues[timeInterned] = lastTime.toJSONField(epoch)
+                    entryValues[timeInterned] = lastTime.toJSONField(period, epoch)
 
             entries.append(entryValues)
 
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
+    let jsonPeriod = if period != 0: period else: uint64(1)
     var zeroDateTime = newQDateTimeObj(0, QtUtc)
+    let timeInterned = internedStrings["time"]
 
     useDB(dbName, dbUsername, dbPassword):
         block:
@@ -290,7 +294,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
                 newTime.setTimeSpec(QtUtc)
 
                 if (period > uint64(0)) and (zeroDateTime < lastTime):
-                    entries.addNulls(order, lastTime, newTime, period, epoch, internedStrings)
+                    entries.addNulls(order, lastTime, newTime, period, epoch, timeInterned)
 
                 lastTime = newTime
 
@@ -311,17 +315,19 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
 
                         fieldName = "mean"
 
-                    var value = record.toJSONField(i, epoch)
-
                     var fieldNameInterned = internedStrings.getOrDefault(fieldName)
-                    if fieldnameInterned == nil:
+                    if fieldNameInterned == nil:
                         new(fieldNameInterned)
                         fieldNameInterned[] = fieldName
 
                         internedStrings[fieldName] = fieldNameInterned
 
                     discard order.hasKeyOrPut(fieldNameInterned, true)
-                    entryValues[fieldNameInterned] = value
+
+                    if fieldNameInterned != timeInterned:
+                        entryValues[fieldNameInterned] = record.toJSONField(i, 1, epoch)
+                    else:
+                        entryValues[fieldNameInterned] = record.toJSONField(i, jsonPeriod, epoch)
 
             entries.append(entryValues)
 
