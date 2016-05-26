@@ -107,7 +107,7 @@ type
         retFuture: Future[ReadLinesFutureContext]
         routerResult: Future[void]
 
-const QUERY_HTTP_METHODS = "GET"
+const QUERY_HTTP_METHODS = "GET, POST"
 const WRITE_HTTP_METHODS = "POST"
 const PING_HTTP_METHODS = "GET, HEAD"
 
@@ -137,6 +137,9 @@ template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
 
 template PING_RESPONSE_HEADERS(): StringTableRef =
     newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
+
+template REGISTRATION_DATA_RESPONSE_HEADERS(): StringTableRef =
+    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDoCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
 
 proc getParams(request: Request): StringTableRef =
     result = newStringTable(modeCaseSensitive)
@@ -425,7 +428,7 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add("&p=")
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
-proc getQuery(request: Request): Future[void] =
+proc getQuery(request: Request, params: StringTableRef): Future[void] =
     var internedStrings = initTable[string, ref string]()
 
     var timeInterned: ref string
@@ -438,8 +441,6 @@ proc getQuery(request: Request): Future[void] =
 
     try:
         GC_disable()
-
-        let params = getParams(request)
 
         let urlQuery = params["q"]
         let specifiedEpochFormat = params.getOrDefault("epoch")
@@ -510,6 +511,21 @@ proc getQuery(request: Request): Future[void] =
                 entry.data.entries.removeAll
         finally:
             GC_enable()
+
+template getQuery(request: Request): Future[void] =
+    getQuery(request, getParams(request))
+
+proc postQuery(request: Request): Future[void] =
+    let params = getParams(request)
+
+    if (params.getOrDefault("db") != "") or (params.getOrDefault("q") != "SHOW DIAGNOSTICS for 'registration'"):
+        result = getQuery(request, params)
+    else:
+        # If the query is POSTed, and the database is empty, and the query is the registration diagnostics query,
+        # then the InfluxDB client is requesting the server's registration data. This isn't an actual InfluxDB server,
+        # so we aren't officially registered.
+        let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
+        result = request.respond(Http200, "{\"results\":[{}]}", REGISTRATION_DATA_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
 
 import posix
 
@@ -731,6 +747,10 @@ proc router(request: Request): Future[void] =
             return
         elif (request.reqMethod == "post") and (request.url.path == "/write"):
             request.postWrite(result)
+            return
+        elif (request.reqMethod == "post") and (request.url.path == "/query"):
+            result.complete
+            request.postQuery.callback = (x: Future[void]) => routerHandleError(request, x)
             return
         elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
             result.complete
