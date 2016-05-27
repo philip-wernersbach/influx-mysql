@@ -9,10 +9,11 @@ proc influxQlToSql(influxQl: string): string =
     var period = uint64(0)
     var fillNull = false
     var cache = true
+    var resultTransform = SQLResultTransform.UNKNOWN
     var dizcard = initSet[string]()
 
-    result = influxQl.influxQlToSql(series, period, fillNull, cache, dizcard) &
-        " /* series=" & (if series != nil: series else: "<nil>") & " period=" & $period & " fillNull=" & $fillNull & " cache=" & $cache & " discard=" & $dizcard & " */"
+    result = influxQl.influxQlToSql(resultTransform, series, period, fillNull, cache, dizcard) &
+        " /* resultTransform=" & $resultTransform & " series=" & (if series != nil: series else: "<nil>") & " period=" & $period & " fillNull=" & $fillNull & " cache=" & $cache & " discard=" & $dizcard & " */"
 
 block:
     for line in stdin.lines:

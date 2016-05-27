@@ -40,6 +40,8 @@ type
     URLParameterNotFoundError = object of URLParameterError
     URLParameterInvalidError = object of URLParameterError
 
+    DBQueryResultTransformationException = object of DBQueryException
+
     JSONEntryValues = tuple
         order: OrderedTableRef[ref string, bool] not nil
         entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
@@ -382,6 +384,36 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     json.add("results", results)
     result = $json
 
+# Applies the specified results transformation to the last series in the list.
+proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransform: SQLResultTransform, internedStrings: var Table[string, ref string]) =
+    case resultTransform:
+    of SQLResultTransform.NONE:
+        discard
+    of SQLResultTransform.SHOW_DATABASES:
+        let series = ev.tail
+        let databaseInterned = internedStrings.getOrDefault("Database")
+
+        if (series[].value.series.len == 0) and (series[].value.data.order.len == 1) and (databaseInterned != nil) and (series[].value.data.order.hasKey(databaseInterned)):
+            var nameInterned = internedStrings.getOrDefault("name")
+            if nameInterned == nil:
+                new(nameInterned)
+                nameInterned[] = "name"
+
+                internedStrings["name"] = nameInterned
+
+            series[].value.series = "databases"
+
+            # Replacing the order table is a workaround, as the standard library doesn't have a del() implementation for
+            # OrderedTables.
+            series[].value.data.order = cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable([(nameInterned, true)]))
+
+            for entry in series[].value.data.entries.items:
+                entry[nameInterned] = entry[databaseInterned]
+                entry.del(databaseInterned)
+
+    of SQLResultTransform.UNKNOWN:
+        raise newException(DBQueryResultTransformationException, "Tried to apply unknown transformation!")
+
 proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string, accessControlMaxAge: string): StringTableRef =
     if corsAllowOrigin != nil:
         if allowMethods != nil:
@@ -480,10 +512,11 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             var series: string
             var period = uint64(0)
             var fillNull = false
+            var resultTransform = SQLResultTransform.UNKNOWN
             var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(series, period, fillNull, cache, dizcard)
-            
+            let sql = line.influxQlToSql(resultTransform, series, period, fillNull, cache, dizcard)
+
             when defined(logrequests):
                 stdout.write("/query: ")
                 stdout.write(line)
@@ -492,6 +525,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
 
             try:
                 sql.runDBQueryAndUnpack(series, period, fillNull, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+                entries.applyResultTransformation(resultTransform, internedStrings)
             except DBQueryException:
                 stdout.write("/query: ")
                 stdout.write(line)

@@ -28,6 +28,12 @@ import influx_line_protocol_to_sql
 # Even though these functions are clearly suboptimal, the alternative is to
 # implement a full InfluxQL parser, which would be a pain.
 
+type
+    SQLResultTransform* {.pure.} = enum
+        UNKNOWN,
+        NONE,
+        SHOW_DATABASES
+
 proc collectNumericPrefix(part: string, newPart: var string) =
     for j in countUp(0, part.len - 2):
         if part[j] in {'0'..'9'}:
@@ -120,10 +126,12 @@ iterator splitInfluxQlStatements*(influxQlStatements: string): string =
         else:
             yield line
 
-proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fillNull: var bool, cache: var bool, dizcard: var HashSet[string]): string =
+proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string, period: var uint64, fillNull: var bool, cache: var bool, dizcard: var HashSet[string]): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
     let lastValidPart = partsLen - 1
+
+    resultTransform = SQLResultTransform.NONE
 
     if (partsLen >= 2):
         case parts[0]:
@@ -269,6 +277,12 @@ proc influxQlToSql*(influxQl: string, series: var string, period: var uint64, fi
 
             result = parts.join(" ")
             return
+        of "SHOW":
+            if parts[1] == "DATABASES":
+                resultTransform = SQLResultTransform.SHOW_DATABASES
+
+                result = influxQl
+                return
         else:
             discard
 
