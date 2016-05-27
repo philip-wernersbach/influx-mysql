@@ -34,6 +34,11 @@ type
         NONE,
         SHOW_DATABASES
 
+    ResultFillType* {.pure.} = enum
+        NONE,
+        NULL,
+        ZERO
+
 proc collectNumericPrefix(part: string, newPart: var string) =
     for j in countUp(0, part.len - 2):
         if part[j] in {'0'..'9'}:
@@ -126,7 +131,7 @@ iterator splitInfluxQlStatements*(influxQlStatements: string): string =
         else:
             yield line
 
-proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string, period: var uint64, fillNull: var bool, cache: var bool, dizcard: var HashSet[string]): string =
+proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string, period: var uint64, fill: var ResultFillType, cache: var bool, dizcard: var HashSet[string]): string =
     var parts = influxQl.split(' ')
     let partsLen = parts.len
     let lastValidPart = partsLen - 1
@@ -190,7 +195,7 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                 if parts[j][jPartLen - 1] == ')':
                                     if parts[j].startsWith("time(") and (parts[j - 1] == "BY") and (parts[j - 2] == "GROUP"):
                                         let intStr = parts[j][5..jPartLen-3]
-                                        fillNull = true
+                                        fill = ResultFillType.NULL
 
                                         case parts[j][jPartLen-2]:
                                         of 'u':
@@ -232,10 +237,13 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                         if partsLen > fillPart:
                                             case parts[fillPart]:
                                             of "fill(null)":
-                                                fillNull = true
+                                                fill = ResultFillType.NULL
                                                 parts[fillPart] = ""
                                             of "fill(none)":
-                                                fillNull = false
+                                                fill = ResultFillType.NONE
+                                                parts[fillPart] = ""
+                                            of "fill(0)":
+                                                fill = ResultFillType.ZERO
                                                 parts[fillPart] = ""
                                             else:
                                                 discard

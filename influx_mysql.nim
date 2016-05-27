@@ -231,7 +231,7 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
     else:
         result.kind = JSONFieldKind.Null
 
-proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
+proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, fill: ResultFillType, order: OrderedTableRef[ref string, bool] not nil,
                 lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
 
     var lastTime = lastTime
@@ -245,6 +245,16 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
         else:
             uint64(1)
 
+    var fillField: JSONField
+
+    case fill:
+    of ResultFillType.NULL:
+        fillField = JSONField(kind: JSONFieldKind.Null)
+    of ResultFillType.ZERO:
+        fillField = JSONField(kind: JSONFieldKind.UInteger, uintVal: 0)
+    else:
+        raise newException(Exception, "Tried to add fill, but fill type is NONE!")
+
     if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 1:
         while true:
             lastTime = lastTime.addMSecs(qint64(period))
@@ -256,13 +266,13 @@ proc addNulls(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
             var entryValues = newTable[ref string, JSONField]()
             for fieldName in order.keys:
                 if fieldName != timeInterned:
-                    entryValues[fieldName] = JSONField(kind: JSONFieldKind.Null)
+                    entryValues[fieldName] = fillField
                 else:
                     entryValues[timeInterned] = lastTime.toJSONField(period, epoch)
 
             entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull: bool, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: ResultFillType, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
     let jsonPeriod = if period != 0: period else: uint64(1)
     var zeroDateTime = newQDateTimeObj(0, QtUtc)
@@ -289,7 +299,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
 
             var entryValues = newTable[ref string, JSONField]()
 
-            if fillNull:
+            if fill != ResultFillType.NONE:
                 # For strict InfluxDB compatibility:
                 #
                 # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
@@ -299,7 +309,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fillNull:
                 newTime.setTimeSpec(QtUtc)
 
                 if (period > uint64(0)) and (zeroDateTime < lastTime):
-                    entries.addNulls(order, lastTime, newTime, period, epoch, timeInterned)
+                    entries.addFill(fill, order, lastTime, newTime, period, epoch, timeInterned)
 
                 lastTime = newTime
 
@@ -511,11 +521,11 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
         for line in urlQuery.splitInfluxQlStatements:
             var series: string
             var period = uint64(0)
-            var fillNull = false
+            var fill = ResultFillType.NONE
             var resultTransform = SQLResultTransform.UNKNOWN
             var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(resultTransform, series, period, fillNull, cache, dizcard)
+            let sql = line.influxQlToSql(resultTransform, series, period, fill, cache, dizcard)
 
             when defined(logrequests):
                 stdout.write("/query: ")
@@ -524,7 +534,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
                 stdout.writeLine(sql)
 
             try:
-                sql.runDBQueryAndUnpack(series, period, fillNull, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+                sql.runDBQueryAndUnpack(series, period, fill, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
                 entries.applyResultTransformation(resultTransform, internedStrings)
             except DBQueryException:
                 stdout.write("/query: ")

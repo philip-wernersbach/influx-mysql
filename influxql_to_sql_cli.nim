@@ -7,13 +7,13 @@ import influxql_to_sql
 proc influxQlToSql(influxQl: string): string =
     var series: string
     var period = uint64(0)
-    var fillNull = false
+    var fill = ResultFillType.NONE
     var cache = true
     var resultTransform = SQLResultTransform.UNKNOWN
     var dizcard = initSet[string]()
 
-    result = influxQl.influxQlToSql(resultTransform, series, period, fillNull, cache, dizcard) &
-        " /* resultTransform=" & $resultTransform & " series=" & (if series != nil: series else: "<nil>") & " period=" & $period & " fillNull=" & $fillNull & " cache=" & $cache & " discard=" & $dizcard & " */"
+    result = influxQl.influxQlToSql(resultTransform, series, period, fill, cache, dizcard) &
+        " /* resultTransform=" & $resultTransform & " series=" & (if series != nil: series else: "<nil>") & " period=" & $period & " fill=" & $fill & " cache=" & $cache & " discard=" & $dizcard & " */"
 
 block:
     for line in stdin.lines:
