@@ -255,7 +255,7 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
     else:
         raise newException(Exception, "Tried to add fill, but fill type is NONE!")
 
-    if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 1:
+    if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 0:
         while true:
             lastTime = lastTime.addMSecs(qint64(period))
 
