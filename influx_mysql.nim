@@ -18,6 +18,7 @@ import cgi
 import times
 import os
 import sets
+import algorithm
 
 import qt5_qtsql
 import snappy as snappy
@@ -48,12 +49,16 @@ type
 
     SeriesAndData = tuple
         series: string
+        fill: ResultFillType
+        pinTimes: bool
+        pinnedTimes: ref HashSet[uint64]
         data: JSONEntryValues
 
     # InfluxDB only supports four data types, which makes this easy
     # We add a fifth one so that we can properly support unsigned integers
     JSONFieldKind {.pure.} = enum
         Null,
+        RFC3339UInteger,
         Integer,
         UInteger,
         Float,
@@ -63,6 +68,7 @@ type
     JSONField = object
         case kind: JSONFieldKind
         of JSONFieldKind.Null: discard
+        of JSONFieldKind.RFC3339UInteger: rfc3339UintVal: uint64
         of JSONFieldKind.Integer: intVal: int64
         of JSONFieldKind.UInteger: uintVal: uint64
         of JSONFieldKind.Float: floatVal: float64
@@ -90,7 +96,8 @@ type
         Float = 135
 
     EpochFormat {.pure.} = enum
-        RFC3339
+        RFC3339UInteger
+        RFC3339String
         Hour
         Minute
         Second
@@ -152,6 +159,18 @@ proc getParams(request: Request): StringTableRef =
         if (keyAndValue.len == 2):
             result[keyAndValue[0]] = keyAndValue[1].decodeUrl
 
+proc pinTime(recordDateTimeField: JSONField, pinnedTimes: var HashSet[uint64], seriesPinnedTimes: ref HashSet[uint64]) =
+    case recordDateTimeField.kind:
+    of JSONFieldKind.RFC3339UInteger:
+        pinnedTimes.incl(recordDateTimeField.rfc3339UintVal)
+        seriesPinnedTimes[].incl(recordDateTimeField.rfc3339UintVal)
+    of JSONFieldKind.UInteger:
+        pinnedTimes.incl(recordDateTimeField.uintVal)
+        seriesPinnedTimes[].incl(recordDateTimeField.uintVal)
+    else:
+        # This should not happen during normal runtime.
+        raise newException(ValueError, "Cannot pin time of type \"" & $recordDateTimeField.kind & "\"!")
+
 proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
     var timeStringConst = dateTime.toQStringObj("yyyy-MM-ddThh:mm:ss.zzz000000Z").toUtf8.constData.umc
 
@@ -160,7 +179,10 @@ proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
 
 proc toJSONField(dateTime: QDateTimeObj, period: uint64, epoch: EpochFormat): JSONField =
     case epoch:
-    of EpochFormat.RFC3339:
+    of EpochFormat.RFC3339UInteger:
+        result.kind = JSONFieldKind.RFC3339UInteger
+        result.rfc3339UintVal = (uint64(dateTime.toMSecsSinceEpoch) div period) * period
+    of EpochFormat.RFC3339String:
         if period != 1:
             let dateTimeBinned = newQDateTimeObj(qint64((uint64(dateTime.toMSecsSinceEpoch) div period) * period), QtUtc)
             result = dateTimeBinned.toRFC3339JSONField
@@ -231,8 +253,18 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
     else:
         result.kind = JSONFieldKind.Null
 
+proc getFillField(fill: ResultFillType): JSONField {.inline.} =
+    case fill:
+    of ResultFillType.NULL:
+        result = JSONField(kind: JSONFieldKind.Null)
+    of ResultFillType.ZERO:
+        result = JSONField(kind: JSONFieldKind.UInteger, uintVal: 0)
+    else:
+        raise newException(Exception, "Tried to generate fill, but fill type is NONE!")
+
 proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, fill: ResultFillType, order: OrderedTableRef[ref string, bool] not nil,
-                lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
+                lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string,
+                pinTimes: bool, pinnedTimes: var HashSet[uint64], seriesPinnedTimes: ref HashSet[uint64]) =
 
     var lastTime = lastTime
     let epochResolution = case epoch:
@@ -245,15 +277,7 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
         else:
             uint64(1)
 
-    var fillField: JSONField
-
-    case fill:
-    of ResultFillType.NULL:
-        fillField = JSONField(kind: JSONFieldKind.Null)
-    of ResultFillType.ZERO:
-        fillField = JSONField(kind: JSONFieldKind.UInteger, uintVal: 0)
-    else:
-        raise newException(Exception, "Tried to add fill, but fill type is NONE!")
+    let fillField = fill.getFillField
 
     if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 1:
         while true:
@@ -268,13 +292,21 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
                 if fieldName != timeInterned:
                     entryValues[fieldName] = fillField
                 else:
-                    entryValues[timeInterned] = lastTime.toJSONField(period, epoch)
+                    let lastTimeJSONField = lastTime.toJSONField(period, epoch)
+                    entryValues[timeInterned] = lastTimeJSONField
+
+                    if pinTimes:
+                        lastTimeJSONField.pinTime(pinnedTimes, seriesPinnedTimes)
 
             entries.append(entryValues)
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: ResultFillType, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: ResultFillType, dizcard: HashSet[string], epoch: EpochFormat,
+                         result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+                         pinTimes: bool, pinnedTimes: var HashSet[uint64],
                          dbName: string, dbUsername: string, dbPassword: string)  =
+
     let jsonPeriod = if period != 0: period else: uint64(1)
+    let timeEpoch = if pinTimes and (epoch == EpochFormat.RFC3339String): EpochFormat.RFC3339UInteger else: epoch
     var zeroDateTime = newQDateTimeObj(0, QtUtc)
     let timeInterned = internedStrings["time"]
 
@@ -285,7 +317,13 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: Res
         sql.useQuery(database)
 
         var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()
-        var seriesAndData: SeriesAndData = (series: series, data: (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
+        var seriesPinnedTimes: ref HashSet[uint64] = nil
+
+        if pinTimes:
+            new(seriesPinnedTimes)
+            seriesPinnedTimes[] = initSet[uint64]()
+
+        var seriesAndData: SeriesAndData = (series: series, fill: fill, pinTimes: pinTimes, pinnedTimes: seriesPinnedTimes, data: (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
                                 entries: entries))
         result.append(seriesAndData)
 
@@ -309,7 +347,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: Res
                 newTime.setTimeSpec(QtUtc)
 
                 if (period > uint64(0)) and (zeroDateTime < lastTime):
-                    entries.addFill(fill, order, lastTime, newTime, period, epoch, timeInterned)
+                    entries.addFill(fill, order, lastTime, newTime, period, timeEpoch, timeInterned, pinTimes, pinnedTimes, seriesPinnedTimes)
 
                 lastTime = newTime
 
@@ -342,18 +380,27 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: Res
                     if fieldNameInterned != timeInterned:
                         entryValues[fieldNameInterned] = record.toJSONField(i, 1, epoch)
                     else:
-                        entryValues[fieldNameInterned] = record.toJSONField(i, jsonPeriod, epoch)
+                        let recordJSONField = record.toJSONField(i, jsonPeriod, timeEpoch)
+                        entryValues[fieldNameInterned] = recordJSONField
+
+                        if pinTimes:
+                            recordJSONField.pinTime(pinnedTimes, seriesPinnedTimes)
 
             entries.append(entryValues)
 
 converter toJsonNode(field: JSONField): JsonNode =
     case field.kind:
     of JSONFieldKind.Null: result = newJNull()
+    of JSONFieldKind.RFC3339UInteger:
+        result = newJString(newQDateTimeObj(qint64(field.rfc3339UintVal), QtUtc).toRFC3339JSONField.stringVal)
     of JSONFieldKind.Integer: result = newJInt(BiggestInt(field.intVal))
     of JSONFieldKind.UInteger: result = newJInt(BiggestInt(field.uintVal))
     of JSONFieldKind.Float: result = newJFloat(field.floatVal)
     of JSONFieldKind.Boolean: result = newJBool(field.booleanVal)
     of JSONFieldKind.String: result = newJString(field.stringVal)
+    else:
+        # This should not happen during normal runtime.
+        raise newException(ValueError, "Cannot convert field of type \"" & $field.kind & "\" to JsonNode!")
 
 proc toJsonNode(kv: SeriesAndData): JsonNode =
     result = newJObject()
@@ -384,12 +431,87 @@ proc toJsonNode(kv: SeriesAndData): JsonNode =
     seriesArray.add(seriesObject)
     result.add("series", seriesArray)
 
-proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
+proc toSortedSeq[T](s: HashSet[T]): seq[T] =
+    result = newSeq[T](s.len)
+
+    result.setLen(0)
+
+    for item in s.items:
+        result.insert(item, result.lowerBound(item))
+
+proc insertPinnedTime(kv: SeriesAndData, lastNode: SinglyLinkedRefListNode[Table[ref string, JSONField]],
+        toPinTime: uint64, fillField: JSONField, epoch: EpochFormat, timeInterned: ref string) =
+
+    echo "Inserting " & $toPinTime
+
+    var entryValues = newTable[ref string, JSONField]()
+
+    for column in kv.data.order.keys:
+        if column != timeInterned:
+            entryValues[column] = fillField
+        else:
+            case epoch:
+            of EpochFormat.RFC3339String:
+                entryValues[column] = JSONField(kind: JSONFieldKind.RFC3339UInteger, rfc3339UintVal: toPinTime)
+            else:
+                entryValues[column] = JSONField(kind: JSONFieldKind.UInteger, uintVal: toPinTime)
+
+    if lastNode != nil:
+        kv.data.entries.appendAfter(cast[SinglyLinkedRefListNode[Table[ref string, JSONField]] not nil](lastNode), entryValues)
+    else:
+        kv.data.entries.prepend(entryValues)
+
+proc insertPinnedTimes(kv: SeriesAndData, toPinTimes: seq[uint64], epoch: EpochFormat, timeInterned: ref string) =
+    let toPinTimesLen = toPinTimes.len
+
+    if (toPinTimesLen > 0) and (kv.data.order.len > 0):
+        let fillField = kv.fill.getFillField
+
+        var i = 0
+        var lastNode: SinglyLinkedRefListNode[Table[ref string, JSONField]] = nil
+
+        for entryNode in kv.data.entries.refListNodes:
+            var timeFieldVal: uint64
+            var toPinTime = toPinTimes[i]
+            let timeField = cast[ref Table[ref string, JSONField]](entryNode.value)[timeInterned]
+
+            case timeField.kind:
+                of JSONFieldKind.RFC3339UInteger: timeFieldVal = timeField.rfc3339UintVal
+                of JSONFieldKind.UInteger: timeFieldVal = timeField.uintVal
+                else:
+                    # This should not happen during normal runtime.
+                    raise newException(ValueError, "Cannot calculate time pins based on field of type \"" & $timeField.kind & "\"!")
+
+            if timeFieldVal > toPinTime:
+                kv.insertPinnedTime(lastNode, toPinTime, fillField, epoch, timeInterned)
+
+                i += 1
+
+                if i < toPinTimesLen:
+                    toPinTime = toPinTimes[i]
+                else:
+                    return
+
+            lastNode = entryNode
+
+        # Insert the remaining pinned times at the tail of the list.
+        while i < toPinTimesLen:
+            kv.insertPinnedTime(kv.data.entries.tail, toPinTimes[i], fillField, epoch, timeInterned)
+
+            i += 1
+
+proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData], pinnedTimes: var HashSet[uint64], epoch: EpochFormat, timeInterned: ref string): string =
     var json = newJObject()
     var results = newJArray()
 
     for keyAndValue in ev.items:
+        if keyAndValue.pinTimes:
+            let toPinTimes = pinnedTimes.difference(keyAndValue.pinnedTimes[]).toSortedSeq
+            echo $toPinTimes
+            keyAndValue.insertPinnedTimes(toPinTimes, epoch, timeInterned)
+
         results.add(keyAndValue.toJsonNode)
+
 
     json.add("results", results)
     result = $json
@@ -471,7 +593,9 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
 proc getQuery(request: Request, params: StringTableRef): Future[void] =
+    var pinnedTimes = initSet[uint64]()
     var internedStrings = initTable[string, ref string]()
+    var entries = initDoublyLinkedList[SeriesAndData]()
 
     var timeInterned: ref string
     new(timeInterned)
@@ -479,15 +603,13 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
 
     internedStrings["time"] = timeInterned
 
-    var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
-
     try:
         GC_disable()
 
         let urlQuery = params["q"]
         let specifiedEpochFormat = params.getOrDefault("epoch")
 
-        var epoch = EpochFormat.RFC3339
+        var epoch = EpochFormat.RFC3339String
 
         if specifiedEpochFormat != "":
             case specifiedEpochFormat:
@@ -526,6 +648,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             var dizcard = initSet[string]()
 
             let sql = line.influxQlToSql(resultTransform, series, period, fill, cache, dizcard)
+            let pinTimes = (period != 0) and (fill != ResultFillType.NONE)
 
             when defined(logrequests):
                 stdout.write("/query: ")
@@ -534,7 +657,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
                 stdout.writeLine(sql)
 
             try:
-                sql.runDBQueryAndUnpack(series, period, fill, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+                sql.runDBQueryAndUnpack(series, period, fill, dizcard, epoch, entries, internedStrings, pinTimes, pinnedTimes, dbName, dbUsername, dbPassword)
                 entries.applyResultTransformation(resultTransform, internedStrings)
             except DBQueryException:
                 stdout.write("/query: ")
@@ -544,9 +667,9 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
                 raise getCurrentException()
 
         if cache != false:
-            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+            result = request.respond(Http200, entries.toQueryResponse(pinnedTimes, epoch, timeInterned), JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
         else:
-            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+            result = request.respond(Http200, entries.toQueryResponse(pinnedTimes, epoch, timeInterned), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
     finally:
         try:
             # SQLEntryValues.entries is a manually allocated object, so we

@@ -11,9 +11,9 @@ when not defined(disablereflists) and (compileOption("gc", "refc") or compileOpt
             next: ptr SinglyLinkedRefListNodeObj[T]
             value: pointer
 
-        SinglyLinkedRefListNode[T] = ptr SinglyLinkedRefListNodeObj[T]
+        SinglyLinkedRefListNode*[T] = ptr SinglyLinkedRefListNodeObj[T]
 
-        SinglyLinkedRefListObj[T] = tuple
+        SinglyLinkedRefListObj*[T] = tuple
             head: SinglyLinkedRefListNode[T]
             tail: SinglyLinkedRefListNode[T]
 
@@ -60,11 +60,30 @@ when not defined(disablereflists) and (compileOption("gc", "refc") or compileOpt
         if list.tail == nil:
             list.tail = node
 
+    proc appendAfter*[T](list: SinglyLinkedRefList[T] not nil, listNode: SinglyLinkedRefListNode[T] not nil, value: ref T) =
+        var node = newSinglyLinkedRefListNode[T](value)
+
+        node.next = listNode.next
+        listNode.next = node
+
+        if list.tail == listNode:
+            list.tail = node
+
+        if list.head == listNode:
+            list.head = node
+
     iterator items*[T](list: SinglyLinkedRefList[T] not nil): ref T =
         var current = list.head
 
         while current != nil:
             yield cast[ref T](current.value)
+            current = current.next
+
+    iterator refListNodes*[T](list: SinglyLinkedRefList[T] not nil): SinglyLinkedRefListNode[T] not nil =
+        var current = list.head
+
+        while current != nil:
+            yield current
             current = current.next
 else:
     import lists
@@ -86,6 +105,10 @@ else:
     iterator items*[T](list: SinglyLinkedRefList[T] not nil): ref T =
         for item in list[].items:
             yield item
+
+    iterator nodes*[T](list: SinglyLinkedRefList[T] not nil): SinglyLinkedRefListNode[T] =
+        for node in list[].nodes:
+            yield node
 
 proc append*[T](list: SinglyLinkedRefList[T] not nil, value: ref T) =
     var node = newSinglyLinkedRefListNode[T](value)

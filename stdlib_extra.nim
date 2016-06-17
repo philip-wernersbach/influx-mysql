@@ -5,6 +5,10 @@ import hashes as hashes
 template hash*(x: ref string): Hash =
     hashes.hash(cast[pointer](x))
 
+template hash*(x: uint64): Hash =
+  ## efficient hashing of uint64 integers
+  Hash(uint32(x))
+
 proc strdup*(s: var string): string =
     result = newString(s.len)
     copyMem(addr(result[0]), addr(s[0]), result.len)
