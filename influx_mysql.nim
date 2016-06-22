@@ -231,19 +231,37 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
     else:
         result.kind = JSONFieldKind.Null
 
+proc `==`(a: JSONField, b: JSONField): bool =
+    if a.kind == b.kind:
+        case a.kind:
+        of JSONFieldKind.Null: result = false
+        of JSONFieldKind.Integer: result = (a.intVal == b.intVal)
+        of JSONFieldKind.UInteger: result = (a.uintVal == b.uintVal)
+        of JSONFieldKind.Float: result = (a.floatVal == b.floatVal)
+        of JSONFieldKind.Boolean: result = (a.booleanVal == b.booleanVal)
+        of JSONFieldKind.String: result = (a.stringVal == b.stringVal)
+    else:
+        result = false
+
+# This function can probably be optimized more. It bugs me that we have to 
+# convert lastTime to a JSONField on each iteration, just to compare the
+# lastTime to the newTime. The problem is that not only do we have to take into
+# account the actual times, we have to take into account lastTime's and
+# newTime's value in the context of both the period and the epoch resolution. I
+# failed to find another way to *correctly* take all of this into account, that
+# is more efficient.
+#
+# It could be worse though. This function is no less efficient when we do need
+# to fill in an entry, since we just assign the lastTime's temporary JSONField
+# to the permanent fill entry. But when we don't need to fill, we create a
+# JSONField for the comparison that is then thrown out.
+#
+# This function is in the query fast path, so any optimizations here will yield
+# a huge performance improvement.
 proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, fill: ResultFillType, order: OrderedTableRef[ref string, bool] not nil,
                 lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
 
     var lastTime = lastTime
-    let epochResolution = case epoch:
-        of EpochFormat.Hour:
-            uint64(3600000)
-        of EpochFormat.Minute:
-            uint64(60000)
-        of EpochFormat.Second:
-            uint64(1000)
-        else:
-            uint64(1)
 
     var fillField: JSONField
 
@@ -255,22 +273,30 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
     else:
         raise newException(Exception, "Tried to add fill, but fill type is NONE!")
 
-    if ((newTime.toMSecsSinceEpoch - lastTime.toMSecsSinceEpoch) div int64(period)) > 0:
-        while true:
-            lastTime = lastTime.addMSecs(qint64(period))
+    let newTimeMsecs = newTime.toMSecsSinceEpoch
+    let newTimeField = newTime.toJSONField(period, epoch)
 
-            if (newTime < lastTime) or
-                ((uint64(newTime.toMSecsSinceEpoch) div epochResolution) - (uint64(lastTime.toMSecsSinceEpoch) div epochResolution) < 1):
-                break
+    lastTime = lastTime.addMSecs(qint64(period))
 
-            var entryValues = newTable[ref string, JSONField]()
-            for fieldName in order.keys:
-                if fieldName != timeInterned:
-                    entryValues[fieldName] = fillField
-                else:
-                    entryValues[timeInterned] = lastTime.toJSONField(period, epoch)
+    while true:
+        if (newTimeMsecs - lastTime.toMSecsSinceEpoch) < 1:
+            break
 
-            entries.append(entryValues)
+        let lastTimeField = lastTime.toJSONField(period, epoch)
+
+        if lastTimeField == newTimeField:
+            break
+
+        var entryValues = newTable[ref string, JSONField]()
+        for fieldName in order.keys:
+            if fieldName != timeInterned:
+                entryValues[fieldName] = fillField
+            else:
+                entryValues[timeInterned] = lastTimeField
+
+        entries.append(entryValues)
+
+        lastTime = lastTime.addMSecs(qint64(period))
 
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: ResultFillType, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
