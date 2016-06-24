@@ -43,6 +43,7 @@ type
     DBQueryResultTransformationException = object of DBQueryException
 
     JSONEntryValues = tuple
+        fill: ResultFillType
         order: OrderedTableRef[ref string, bool] not nil
         entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
 
@@ -298,8 +299,11 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
 
         lastTime = lastTime.addMSecs(qint64(period))
 
-proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: ResultFillType, dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
+                         fill: ResultFillType, fillMin: uint64, fillMax: uint64,
+                         dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbName: string, dbUsername: string, dbPassword: string)  =
+
     let jsonPeriod = if period != 0: period else: uint64(1)
     var zeroDateTime = newQDateTimeObj(0, QtUtc)
     let timeInterned = internedStrings["time"]
@@ -311,13 +315,13 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: Res
         sql.useQuery(database)
 
         var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()
-        var seriesAndData: SeriesAndData = (series: series, data: (order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
+        var seriesAndData: SeriesAndData = (series: series, data: (fill: fill, order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
                                 entries: entries))
         result.append(seriesAndData)
 
         var order = seriesAndData.data.order
 
-        var lastTime = zeroDateTime
+        var lastTime = if fillMin > uint64(0): newQDateTimeObj(qint64(fillMin), QtUtc) else: zeroDateTime
 
         while query.next() == true:
             var record = query.record
@@ -372,6 +376,21 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64, fill: Res
 
             entries.append(entryValues)
 
+        # Add fills until fillMax.
+        if fill != ResultFillType.NONE:
+            # For strict InfluxDB compatibility:
+            #
+            # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
+            # SQL databases do not do this, they return nothing if there is no data. So we need to add these
+            # NULLs.
+            var newTime = newQDateTimeObj(qint64(fillMax), QtUtc)
+
+            if (period > uint64(0)) and (zeroDateTime < lastTime):
+                entries.addFill(fill, order, lastTime, newTime, period, epoch, timeInterned)
+
+            lastTime = newTime
+
+
 converter toJsonNode(field: JSONField): JsonNode =
     case field.kind:
     of JSONFieldKind.Null: result = newJNull()
@@ -381,7 +400,7 @@ converter toJsonNode(field: JSONField): JsonNode =
     of JSONFieldKind.Boolean: result = newJBool(field.booleanVal)
     of JSONFieldKind.String: result = newJString(field.stringVal)
 
-proc toJsonNode(kv: SeriesAndData): JsonNode =
+proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
     result = newJObject()
     var seriesArray = newJArray()
     var seriesObject = newJObject()
@@ -401,7 +420,10 @@ proc toJsonNode(kv: SeriesAndData): JsonNode =
         var entryArray = newJArray()
 
         for column in kv.data.order.keys:
-            entryArray.add(entry[column])
+            if entry.hasKey(column):
+                entryArray.add(entry[column])
+            elif fill:
+                entryArray.add(fillField)
 
         valuesArray.add(entryArray)
 
@@ -415,7 +437,20 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     var results = newJArray()
 
     for keyAndValue in ev.items:
-        results.add(keyAndValue.toJsonNode)
+        var fill: bool
+        var fillField: JSONField
+
+        case keyAndValue.data.fill:
+        of ResultFillType.NULL:
+            fillField = JSONField(kind: JSONFieldKind.Null)
+            fill = true
+        of ResultFillType.ZERO:
+            fillField = JSONField(kind: JSONFieldKind.UInteger, uintVal: 0)
+            fill = true
+        else:
+            fill = false
+
+        results.add(keyAndValue.toJsonNode(fill, fillField))
 
     json.add("results", results)
     result = $json
@@ -547,11 +582,13 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
         for line in urlQuery.splitInfluxQlStatements:
             var series: string
             var period = uint64(0)
-            var fill = ResultFillType.NONE
             var resultTransform = SQLResultTransform.UNKNOWN
+            var fill = ResultFillType.NONE
+            var fillMin = uint64(0)
+            var fillMax = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
             var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(resultTransform, series, period, fill, cache, dizcard)
+            let sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard)
 
             when defined(logrequests):
                 stdout.write("/query: ")
@@ -560,7 +597,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
                 stdout.writeLine(sql)
 
             try:
-                sql.runDBQueryAndUnpack(series, period, fill, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
+                sql.runDBQueryAndUnpack(series, period, fill, fillMin, fillMax, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
                 entries.applyResultTransformation(resultTransform, internedStrings)
             except DBQueryException:
                 stdout.write("/query: ")

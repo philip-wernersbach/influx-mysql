@@ -22,6 +22,8 @@ proc newQDateTimeObj*(msecs: qint64, timeSpec: QtTimeSpec): QDateTimeObj =
     result.setTimeSpec(timeSpec)
     result.setMSecsSinceEpoch(msecs)
 
+proc currentQDateTimeUtc*(): QDateTimeObj {.header: QDATETIME_H, importcpp: "QDateTime::currentDateTimeUtc".}
+
 proc toQStringObj*(dateTime: QDateTimeObj, format: cstring): QStringObj {.header: QDATETIME_H, importcpp: "toString".}
 proc toMSecsSinceEpoch*(dateTime: QDateTimeObj): qint64 {.header: QDATETIME_H, importcpp: "toMSecsSinceEpoch".}
 

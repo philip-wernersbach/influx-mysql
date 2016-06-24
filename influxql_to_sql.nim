@@ -1,6 +1,8 @@
 import strutils
 import sets
 
+import parseutils_extra
+import qdatetime
 import influx_line_protocol_to_sql
 
 # For some reason InfluxDB implements its own version of SQL that is not compatible
@@ -38,6 +40,51 @@ type
         NONE,
         NULL,
         ZERO
+
+    TimeComparisonType {.pure.} = enum
+        NONE,
+        LT,
+        GT,
+        LTE,
+        GTE
+
+    TimeArithmeticType {.pure.} = enum
+        NONE,
+        ADD,
+        SUB
+
+proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64): bool =
+    let iqlLen = iql.len
+    let literalTypePos = iqlLen - 1
+
+    if iqlLen > 0:
+        case iql[literalTypePos]:
+        of 'u':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis = millis div 1000
+        of 's':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis *= 1000
+        of 'm':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis *= 60000
+        of 'h':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis *= 3600000
+        of 'd':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis *= 86400000
+        of 'w':
+            result = (iql.parseBiggestUInt(millis) == literalTypePos)
+            millis *= 604800000
+        of ')':
+            if iql == "now()":
+                millis = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
+                result = true
+        else:
+            result = false
+    else:
+        result = false
 
 proc collectNumericPrefix(part: string, newPart: var string) =
     for j in countUp(0, part.len - 2):
@@ -131,7 +178,10 @@ iterator splitInfluxQlStatements*(influxQlStatements: string): string =
         else:
             yield line
 
-proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string, period: var uint64, fill: var ResultFillType, cache: var bool, dizcard: var HashSet[string]): string =
+proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string,
+    period: var uint64, fill: var ResultFillType, fillMin: var uint64, fillMax: var uint64,
+    cache: var bool, dizcard: var HashSet[string]): string =
+
     var parts = influxQl.split(' ')
     let partsLen = parts.len
     let lastValidPart = partsLen - 1
@@ -166,6 +216,11 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
 
                             for j in countUp(wherePartStart, lastValidPart):
                                 if parts[j] == "WHERE":
+                                    var isTime = 0
+                                    var timeComp = TimeComparisonType.NONE
+                                    var timeArithType = TimeArithmeticType.NONE
+                                    var timeVal = uint64(0)
+
                                     var glob = false
                                     var globOpen = 0
 
@@ -184,6 +239,88 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                                 parts[k][lastChar] = ')'
 
                                                 glob = false
+
+                                        # Time comparison and arithmetic state machine
+                                        case isTime:
+                                        of 0:
+                                            if parts[k] == "time":
+                                                isTime = 1
+                                        of 1:
+                                            case parts[k]:
+                                            of "<":
+                                                timeComp = TimeComparisonType.LT
+                                                isTime = 2
+                                            of ">":
+                                                timeComp = TimeComparisonType.GT
+                                                isTime = 2
+                                            of "<=":
+                                                timeComp = TimeComparisonType.LTE
+                                                isTime = 2
+                                            of ">=":
+                                                timeComp = TimeComparisonType.GTE
+                                                isTime = 2
+                                            else:
+                                                isTime = 0
+                                        of 2:
+                                            if parts[k].influxQlTimeLiteralToMillis(timeVal):
+                                                # Compute the fill values
+                                                case timeComp:
+                                                of TimeComparisonType.LT:
+                                                    fillMax = timeVal
+                                                of TimeComparisonType.GT:
+                                                    fillMin = timeVal
+                                                of TimeComparisonType.LTE:
+                                                    fillMax = timeVal + 1
+                                                of TimeComparisonType.GTE:
+                                                    fillMin = timeVal - 1
+                                                of TimeComparisonType.NONE:
+                                                    # This should not happen under normal runtime circumstances
+                                                    raise newException(ValueError, "Invalid TimeComparisonType of NONE for stage 3 in time comparison and arithmetic state machine!")
+
+                                                isTime = 3
+                                            else:
+                                                isTime = 0
+                                        of 3:
+                                            case parts[k]:
+                                            of "+":
+                                                timeArithType = TimeArithmeticType.ADD
+                                                isTime = 4
+                                            of "-":
+                                                timeArithType = TimeArithmeticType.SUB
+                                                isTime = 4
+                                            else:
+                                                isTime = 0
+                                        of 4:
+                                            timeVal = 0
+
+                                            if parts[k].influxQlTimeLiteralToMillis(timeVal):
+                                                # Adjust the fill values
+                                                case timeComp:
+                                                of TimeComparisonType.LT, TimeComparisonType.LTE:
+                                                    case timeArithType:
+                                                    of TimeArithmeticType.ADD:
+                                                        fillMax += timeVal
+                                                    of TimeArithmeticType.SUB:
+                                                        fillMax -= timeVal
+                                                    of TimeArithmeticType.NONE:
+                                                        # This should not happen under normal runtime circumstances
+                                                        raise newException(ValueError, "Invalid TimeArithmeticType of NONE for stage 4 in time comparison and arithmetic state machine!")
+                                                of TimeComparisonType.GT, TimeComparisonType.GTE:
+                                                    case timeArithType:
+                                                    of TimeArithmeticType.ADD:
+                                                        fillMin += timeVal
+                                                    of TimeArithmeticType.SUB:
+                                                        fillMin -= timeVal
+                                                    of TimeArithmeticType.NONE:
+                                                        # This should not happen under normal runtime circumstances
+                                                        raise newException(ValueError, "Invalid TimeArithmeticType of NONE for stage 4 in time comparison and arithmetic state machine!")
+                                                of TimeComparisonType.NONE:
+                                                    # This should not happen under normal runtime circumstances
+                                                    raise newException(ValueError, "Invalid TimeComparisonType of NONE for stage 4 in time comparison and arithmetic state machine!")
+
+                                            isTime = 0
+                                        else:
+                                            discard
 
                                         k += 1
 
