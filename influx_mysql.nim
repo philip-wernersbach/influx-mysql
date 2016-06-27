@@ -259,20 +259,10 @@ proc `==`(a: JSONField, b: JSONField): bool =
 #
 # This function is in the query fast path, so any optimizations here will yield
 # a huge performance improvement.
-proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, fill: ResultFillType, order: OrderedTableRef[ref string, bool] not nil,
+proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
                 lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
 
     var lastTime = lastTime
-
-    var fillField: JSONField
-
-    case fill:
-    of ResultFillType.NULL:
-        fillField = JSONField(kind: JSONFieldKind.Null)
-    of ResultFillType.ZERO:
-        fillField = JSONField(kind: JSONFieldKind.UInteger, uintVal: 0)
-    else:
-        raise newException(Exception, "Tried to add fill, but fill type is NONE!")
 
     let newTimeMsecs = newTime.toMSecsSinceEpoch
     let newTimeField = newTime.toJSONField(period, epoch)
@@ -289,11 +279,7 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
             break
 
         var entryValues = newTable[ref string, JSONField]()
-        for fieldName in order.keys:
-            if fieldName != timeInterned:
-                entryValues[fieldName] = fillField
-            else:
-                entryValues[timeInterned] = lastTimeField
+        entryValues[timeInterned] = lastTimeField
 
         entries.append(entryValues)
 
@@ -339,7 +325,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
                 newTime.setTimeSpec(QtUtc)
 
                 if (period > uint64(0)) and (zeroDateTime < lastTime):
-                    entries.addFill(fill, order, lastTime, newTime, period, epoch, timeInterned)
+                    entries.addFill(order, lastTime, newTime, period, epoch, timeInterned)
 
                 lastTime = newTime
 
@@ -386,7 +372,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
             var newTime = newQDateTimeObj(qint64(fillMax), QtUtc)
 
             if (period > uint64(0)) and (zeroDateTime < lastTime):
-                entries.addFill(fill, order, lastTime, newTime, period, epoch, timeInterned)
+                entries.addFill(order, lastTime, newTime, period, epoch, timeInterned)
 
             lastTime = newTime
 
@@ -416,16 +402,22 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
 
     var valuesArray = newJArray()
 
-    for entry in kv.data.entries.items:
-        var entryArray = newJArray()
+    if fill:
+        for entry in kv.data.entries.items:
+            var entryArray = newJArray()
 
-        for column in kv.data.order.keys:
-            if entry.hasKey(column):
+            for column in kv.data.order.keys:
+                entryArray.add(entry.mgetOrPut(column, fillField))
+
+            valuesArray.add(entryArray)
+    else:
+        for entry in kv.data.entries.items:
+            var entryArray = newJArray()
+
+            for column in kv.data.order.keys:
                 entryArray.add(entry[column])
-            elif fill:
-                entryArray.add(fillField)
 
-        valuesArray.add(entryArray)
+            valuesArray.add(entryArray)
 
     seriesObject.add("values", valuesArray)
 
