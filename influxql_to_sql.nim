@@ -276,20 +276,28 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                                     case timeArithType:
                                                     of TimeArithmeticType.ADD:
                                                         fillMax += timeVal
+                                                        timeVal = fillMax
                                                     of TimeArithmeticType.SUB:
                                                         fillMax -= timeVal
+                                                        timeVal = fillMax
                                                     of TimeArithmeticType.NONE:
                                                         # This should not happen under normal runtime circumstances
                                                         raise newException(ValueError, "Invalid TimeArithmeticType of NONE for stage 4 in time comparison and arithmetic state machine!")
+
+                                                    parts[k - 3] = "<"
                                                 of TimeComparisonType.GT, TimeComparisonType.GTE:
                                                     case timeArithType:
                                                     of TimeArithmeticType.ADD:
                                                         fillMin += timeVal
+                                                        timeVal = fillMin
                                                     of TimeArithmeticType.SUB:
                                                         fillMin -= timeVal
+                                                        timeVal = fillMin
                                                     of TimeArithmeticType.NONE:
                                                         # This should not happen under normal runtime circumstances
                                                         raise newException(ValueError, "Invalid TimeArithmeticType of NONE for stage 4 in time comparison and arithmetic state machine!")
+
+                                                    parts[k - 3] = ">"
                                                 of TimeComparisonType.NONE:
                                                     # This should not happen under normal runtime circumstances
                                                     raise newException(ValueError, "Invalid TimeComparisonType of NONE for stage 4 in time comparison and arithmetic state machine!")
