@@ -2,7 +2,6 @@ import strutils
 import sets
 
 import parseutils_extra
-import qdatetime
 import influx_line_protocol_to_sql
 
 # For some reason InfluxDB implements its own version of SQL that is not compatible
@@ -53,7 +52,7 @@ type
         ADD,
         SUB
 
-proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64): bool =
+proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64, nowTime: uint64): bool =
     let iqlLen = iql.len
     let literalTypePos = iqlLen - 1
 
@@ -79,49 +78,12 @@ proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64): bool =
             millis *= 604800000
         of ')':
             if iql == "now()":
-                millis = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
+                millis = nowTime
                 result = true
         else:
             result = false
     else:
         result = false
-
-proc collectNumericPrefix(part: string, newPart: var string) =
-    for j in countUp(0, part.len - 2):
-        if part[j] in {'0'..'9'}:
-            newPart.add(part[j])
-        else:
-            return
-
-proc potentialTimeLiteralToSQLInterval(parts: var seq[string], i: int, intervalType: string) =
-    let part = parts[i]
-    var newPart = newStringOfCap(part.len + 20)
-
-    if i > 0:
-        case parts[i-1]:
-        of ">", "<", "=", "==", ">=", "<=":
-            case part[part.len-1]:
-            of 's':
-                newPart.add("FROM_UNIXTIME(")
-                part.collectNumericPrefix(newPart)
-                newPart.add(")")
-                
-                parts[i] = newPart
-            else:
-                discard
-
-            return
-        else:
-            discard
-
-    newPart.add("INTERVAL ")
-    part.collectNumericPrefix(newPart)
-
-    newPart.add(" ")
-    newPart.add(intervalType)
-
-    if newPart.len > (intervalType.len + 10):
-        parts[i] = newPart
 
 iterator splitIndividualStatements(stmts: string, begin: Natural, pos: Natural): string =
     var begin = begin
@@ -178,9 +140,25 @@ iterator splitInfluxQlStatements*(influxQlStatements: string): string =
         else:
             yield line
 
+proc millisToUnixtime(part: var string, millis: uint64) {.inline.} =
+    part.setLen(part.len + 20)
+    part.setLen(0)
+
+    part.add("FROM_UNIXTIME(")
+    part.add($(float64(millis) / 1000))
+    part.add(")")
+
+proc intStrToComputedUnixtime(part: var string, intStr: string, computation: string) {.inline.} =
+    part.setLen(41 + intStr.len)
+    part.setLen(0)
+
+    part.add("UNIX_TIMESTAMP(time) DIV ( ")
+    part.add(intStr)
+    part.add(computation)
+
 proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, series: var string,
     period: var uint64, fill: var ResultFillType, fillMin: var uint64, fillMax: var uint64,
-    cache: var bool, dizcard: var HashSet[string]): string =
+    cache: var bool, dizcard: var HashSet[string], nowTime: uint64): string =
 
     var parts = influxQl.split(' ')
     let partsLen = parts.len
@@ -207,10 +185,6 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
 
                         if (partsLen > seriesPos):
                             let wherePartStart = seriesPos + 1
-
-                            when defined(influxql_unquote_everything):
-                                if (parts[seriesPos][0] == '"') and (parts[seriesPos][parts[seriesPos].len - 1] == '"'):
-                                    parts[seriesPos] = parts[seriesPos].unescape
 
                             series = parts[seriesPos]
 
@@ -262,7 +236,7 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                             else:
                                                 isTime = 0
                                         of 2:
-                                            if parts[k].influxQlTimeLiteralToMillis(timeVal):
+                                            if parts[k].influxQlTimeLiteralToMillis(timeVal, nowTime):
                                                 # Compute the fill values
                                                 case timeComp:
                                                 of TimeComparisonType.LT:
@@ -276,6 +250,8 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                                 of TimeComparisonType.NONE:
                                                     # This should not happen under normal runtime circumstances
                                                     raise newException(ValueError, "Invalid TimeComparisonType of NONE for stage 3 in time comparison and arithmetic state machine!")
+
+                                                parts[k].millisToUnixtime(timeVal)
 
                                                 isTime = 3
                                             else:
@@ -293,7 +269,7 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                         of 4:
                                             timeVal = 0
 
-                                            if parts[k].influxQlTimeLiteralToMillis(timeVal):
+                                            if parts[k].influxQlTimeLiteralToMillis(timeVal, nowTime):
                                                 # Adjust the fill values
                                                 case timeComp:
                                                 of TimeComparisonType.LT, TimeComparisonType.LTE:
@@ -318,6 +294,10 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                                     # This should not happen under normal runtime circumstances
                                                     raise newException(ValueError, "Invalid TimeComparisonType of NONE for stage 4 in time comparison and arithmetic state machine!")
 
+                                                parts[k - 2] = ""
+                                                parts[k - 1] = ""
+                                                parts[k].millisToUnixtime(timeVal)
+
                                             isTime = 0
                                         else:
                                             discard
@@ -329,7 +309,7 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                             for j in countDown(lastValidPart, wherePartStart):
                                 let jPartLen = parts[j].len
 
-                                if parts[j][jPartLen - 1] == ')':
+                                if (jPartLen > 0) and (parts[j][jPartLen - 1] == ')'):
                                     if parts[j].startsWith("time(") and (parts[j - 1] == "BY") and (parts[j - 2] == "GROUP"):
                                         let intStr = parts[j][5..jPartLen-3]
                                         fill = ResultFillType.NULL
@@ -341,32 +321,43 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
-
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 0.000001 )")
                                         of 's':
                                             period = uint64(intStr.parseBiggestInt) * 1000
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " )")
                                         of 'm':
                                             period = uint64(intStr.parseBiggestInt) * 60000
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time)"
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 60 )")
                                         of 'h':
                                             period = uint64(intStr.parseBiggestInt) * 3600000
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time)"
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 3600 )")
                                         of 'd':
                                             period = uint64(intStr.parseBiggestInt) * 86400000
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time)"
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 86400 )")
                                         of 'w':
                                             period = uint64(intStr.parseBiggestInt) * 604800000
 
                                             if intStr == "1":
                                                 parts[j] = "YEAR(time), WEEK(time)"
+                                            else:
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 604800 )")
                                         else:
                                             discard
 
@@ -390,18 +381,6 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                     elif parts[j].startsWith("discard("):
                                         dizcard.incl(parts[j][8..jPartLen-2])
                                         parts[j] = ""
-
-                                    when defined(influxql_unquote_everything):
-                                        if parts[j][jPartLen - 2] == '"':
-                                            let functionName = parts[j].getToken('(', 0)
-                                            var newPart = newStringOfCap(jPartLen - 2)
-
-                                            newPart.add(functionName)
-                                            newPart.add('(')
-                                            newPart.add(parts[j][functionName.len+2..jPartLen-3])
-                                            newPart.add(")")
-
-                                            parts[j] = newPart
                             break
 
         of "DROP":
@@ -430,66 +409,5 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                 return
         else:
             discard
-
-    for i in countUp(0, lastValidPart):
-        let part = parts[i]
-
-        if part.len < 1:
-            continue
-
-        case part:
-        of "now()":
-            parts[i] = "NOW(6)"
-        else:
-            if (part[part.len - 1] == ')') and part.startsWith("time("):
-                let timeframeType = part[part.len-2]
-                let timeframeNumber = part[5..part.len-3]
-                
-                parts[i] = newStringOfCap(41 + timeframeNumber.len)
-                parts[i].add("UNIX_TIMESTAMP(time) DIV ( ")
-                parts[i].add(timeframeNumber)
-
-                case timeframeType:
-                of 'u':
-                    parts[i].add(" * 0.000001 )")
-                of 's':
-                    parts[i].add(" )")
-                of 'm':
-                    parts[i].add(" * 60 )")
-                of 'h':
-                    parts[i].add(" * 3600 )")
-                of 'd':
-                    parts[i].add(" * 86400 )")
-                of 'w':
-                    parts[i].add(" * 604800 )")
-                else:
-                    discard
-            else:
-                case part[part.len - 1]:
-                of 'u':
-                    parts.potentialTimeLiteralToSQLInterval(i, "MICROSECOND")
-                of 's':
-                    parts.potentialTimeLiteralToSQLInterval(i, "SECOND")
-                of 'm':
-                    parts.potentialTimeLiteralToSQLInterval(i, "MINUTE")
-                of 'h':
-                    parts.potentialTimeLiteralToSQLInterval(i, "HOUR")
-                of 'd':
-                    parts.potentialTimeLiteralToSQLInterval(i, "DAY")
-                of 'w':
-                    parts.potentialTimeLiteralToSQLInterval(i, "WEEK")
-                else:
-                    when defined(influxql_unquote_everything):
-                        case part[part.len - 1]:
-                        of '\'':
-                            if part[0] == '\'':
-                                parts[i] = part[1..part.len - 2]
-                        of '\"':
-                            if part[0] == '\"':
-                                parts[i] = part[1..part.len - 2]
-                        else:
-                            discard
-                    else:
-                        discard
 
     result = parts.join(" ")

@@ -532,6 +532,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
     internedStrings["time"] = timeInterned
 
     var entries = initDoublyLinkedList[SeriesAndData]()
+    let nowTime = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
 
     try:
         GC_disable()
@@ -579,7 +580,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             var fillMax = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
             var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard)
+            let sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard, nowTime)
 
             when defined(logrequests):
                 stdout.write("/query: ")
