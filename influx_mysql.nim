@@ -306,7 +306,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
         var order = seriesAndData.order
 
-        var lastTime = if fillMin > uint64(0): newQDateTimeObj(qint64(fillMin), QtUtc) else: zeroDateTime
+        var lastTime = if fillMin > uint64(period): newQDateTimeObj(qint64(fillMin - period), QtUtc) else: zeroDateTime
 
         while query.next() == true:
             var record = query.record
