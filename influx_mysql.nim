@@ -42,14 +42,11 @@ type
 
     DBQueryResultTransformationException = object of DBQueryException
 
-    JSONEntryValues = tuple
+    SeriesAndData = tuple
         fill: ResultFillType
+        series: string
         order: OrderedTableRef[ref string, bool] not nil
         entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
-
-    SeriesAndData = tuple
-        series: string
-        data: JSONEntryValues
 
     # InfluxDB only supports four data types, which makes this easy
     # We add a fifth one so that we can properly support unsigned integers
@@ -303,11 +300,11 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
         sql.useQuery(database)
 
         var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()
-        var seriesAndData: SeriesAndData = (series: series, data: (fill: fill, order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
-                                entries: entries))
+        var seriesAndData: SeriesAndData = (fill: fill, series: series, order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
+                                entries: entries)
         result.append(seriesAndData)
 
-        var order = seriesAndData.data.order
+        var order = seriesAndData.order
 
         var lastTime = if fillMin > uint64(0): newQDateTimeObj(qint64(fillMin), QtUtc) else: zeroDateTime
 
@@ -397,7 +394,7 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
 
     var columns = newJArray()
 
-    for column in kv.data.order.keys:
+    for column in kv.order.keys:
         columns.add(newJString(column[]))
 
     seriesObject.add("columns", columns)
@@ -405,18 +402,18 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
     var valuesArray = newJArray()
 
     if fill:
-        for entry in kv.data.entries.items:
+        for entry in kv.entries.items:
             var entryArray = newJArray()
 
-            for column in kv.data.order.keys:
+            for column in kv.order.keys:
                 entryArray.add(entry.mgetOrPut(column, fillField))
 
             valuesArray.add(entryArray)
     else:
-        for entry in kv.data.entries.items:
+        for entry in kv.entries.items:
             var entryArray = newJArray()
 
-            for column in kv.data.order.keys:
+            for column in kv.order.keys:
                 entryArray.add(entry[column])
 
             valuesArray.add(entryArray)
@@ -434,7 +431,7 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
         var fill: bool
         var fillField: JSONField
 
-        case keyAndValue.data.fill:
+        case keyAndValue.fill:
         of ResultFillType.NULL:
             fillField = JSONField(kind: JSONFieldKind.Null)
             fill = true
@@ -458,7 +455,7 @@ proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransf
         let series = ev.tail
         let databaseInterned = internedStrings.getOrDefault("Database")
 
-        if (series[].value.series.len == 0) and (series[].value.data.order.len == 1) and (databaseInterned != nil) and (series[].value.data.order.hasKey(databaseInterned)):
+        if (series[].value.series.len == 0) and (series[].value.order.len == 1) and (databaseInterned != nil) and (series[].value.order.hasKey(databaseInterned)):
             var nameInterned = internedStrings.getOrDefault("name")
             if nameInterned == nil:
                 new(nameInterned)
@@ -470,9 +467,9 @@ proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransf
 
             # Replacing the order table is a workaround, as the standard library doesn't have a del() implementation for
             # OrderedTables.
-            series[].value.data.order = cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable([(nameInterned, true)]))
+            series[].value.order = cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable([(nameInterned, true)]))
 
-            for entry in series[].value.data.entries.items:
+            for entry in series[].value.entries.items:
                 entry[nameInterned] = entry[databaseInterned]
                 entry.del(databaseInterned)
 
@@ -534,7 +531,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
 
     internedStrings["time"] = timeInterned
 
-    var entries = initDoublyLinkedList[tuple[series: string, data: JSONEntryValues]]()
+    var entries = initDoublyLinkedList[SeriesAndData]()
 
     try:
         GC_disable()
@@ -609,7 +606,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             # SQLEntryValues.entries is a manually allocated object, so we
             # need to free it.
             for entry in entries.items:
-                entry.data.entries.removeAll
+                entry.entries.removeAll
         finally:
             GC_enable()
 
