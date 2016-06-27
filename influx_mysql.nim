@@ -157,7 +157,8 @@ proc toRFC3339JSONField(dateTime: QDateTimeObj): JSONField =
     var timeStringConst = dateTime.toQStringObj("yyyy-MM-ddThh:mm:ss.zzz000000Z").toUtf8.constData.umc
 
     result.kind = JSONFieldKind.String
-    result.stringVal = timeStringConst.strdup
+    result.stringVal.shallowCopy(timeStringConst.strdup)
+    shallow(result.stringVal)
 
 proc toJSONField(dateTime: QDateTimeObj, period: uint64, epoch: EpochFormat): JSONField =
     case epoch:
@@ -224,7 +225,8 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
             var valueStringConst = valueVariant.toQStringObj.toUtf8.constData.umc
 
             result.kind = JSONFieldKind.String
-            result.stringVal = valueStringConst.strdup
+            result.stringVal.shallowCopy(valueStringConst.strdup)
+            shallow(result.stringVal)
 
         else:
 
