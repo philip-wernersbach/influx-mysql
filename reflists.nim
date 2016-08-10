@@ -2,10 +2,7 @@
 # the reference counting GC's are recursive, and so they overflow the stack when a list is really
 # large. reflists degrade to regular linked lists when the selected GC is not a reference counting
 # GC because the mark-and-sweep GC's do not overflow the stack for large lists.
-#
-# markAndSweep has been added to the list of GC's where reflists are enabled by default due to a
-# compiler bug that makes the compiler unable to generate traversals for large linked lists.
-when not defined(disablereflists) and (compileOption("gc", "refc") or compileOption("gc", "v2") or compileOption("gc", "markAndSweep")):
+when not defined(disablereflists) and (compileOption("gc", "refc") or compileOption("gc", "v2")):
     type 
         SinglyLinkedRefListNodeObj[T] = tuple
             next: ptr SinglyLinkedRefListNodeObj[T]
