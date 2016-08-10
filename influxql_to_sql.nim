@@ -112,7 +112,7 @@ iterator splitIndividualStatements(stmts: string, begin: Natural, pos: Natural):
                     (stmts[pos + 4] == 'P')
         )):
 
-            yield stmts[begin..pos-1]
+            yield stmts[int(begin)..pos-1]
             begin = pos + 1
 
         pos = pos + 1
@@ -121,11 +121,11 @@ iterator splitIndividualStatements(stmts: string, begin: Natural, pos: Natural):
             if length > pos:
                 pos = stmts.find(';', pos)
             else:
-                yield stmts[begin..length-1]
+                yield stmts[int(begin)..length-1]
                 break
 
             if pos < 0:
-                yield stmts[begin..length-1]
+                yield stmts[int(begin)..length-1]
                 break
         else:
             break

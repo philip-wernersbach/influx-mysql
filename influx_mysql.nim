@@ -8,6 +8,7 @@ import strtabs
 import strutils
 import asyncdispatch
 import asyncnet
+import httpcore
 import asynchttpserver
 from net import BufferSize, TimeoutError
 import lists
@@ -123,23 +124,23 @@ const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s
 
 var corsAllowOrigin: cstring = nil
 
-template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDoCacheHeader, modeCaseSensitive)
+template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "application/json"), ("Cache-Control", cacheControlDoCacheHeader)])
 
-template JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "application/json", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
+template JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "application/json"), ("Cache-Control", cacheControlDontCacheHeader)])
 
-template TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, modeCaseSensitive)
+template TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "text/plain"), ("Cache-Control", cacheControlDontCacheHeader)])
 
-template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDoCacheHeader, modeCaseSensitive)
+template TEXT_CONTENT_TYPE_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "text/plain"), ("Cache-Control", cacheControlDoCacheHeader)])
 
-template PING_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDontCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
+template PING_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "text/plain"), ("Cache-Control", cacheControlDontCacheHeader), ("Date", date), ("X-Influxdb-Version", "0.9.3-compatible-influxmysql")])
 
-template REGISTRATION_DATA_RESPONSE_HEADERS(): StringTableRef =
-    newStringTable("Content-Type", "text/plain", "Cache-Control", cacheControlDoCacheHeader, "Date", date, "X-Influxdb-Version", "0.9.3-compatible-influxmysql", modeCaseSensitive)
+template REGISTRATION_DATA_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "text/plain"), ("Cache-Control", cacheControlDoCacheHeader), ("Date", date), ("X-Influxdb-Version", "0.9.3-compatible-influxmysql")])
 
 proc getParams(request: Request): StringTableRef =
     result = newStringTable(modeCaseSensitive)
@@ -476,7 +477,7 @@ proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransf
     of SQLResultTransform.UNKNOWN:
         raise newException(DBQueryResultTransformationException, "Tried to apply unknown transformation!")
 
-proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string, accessControlMaxAge: string): StringTableRef =
+proc withCorsIfNeeded(headers: HttpHeaders, allowMethods: string, accessControlMaxAge: string): HttpHeaders =
     if corsAllowOrigin != nil:
         if allowMethods != nil:
             headers["Access-Control-Allow-Methods"] = allowMethods
@@ -490,7 +491,7 @@ proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string, accessContr
 
     result = headers
 
-proc withCorsIfNeeded(headers: StringTableRef, allowMethods: string): StringTableRef =
+proc withCorsIfNeeded(headers: HttpHeaders, allowMethods: string): HttpHeaders =
     if headers["Cache-Control"] == cacheControlDoCacheHeader:
         result = headers.withCorsIfNeeded(allowMethods, cachecontrolmaxage)
     elif headers["Cache-Control"] == cacheControlDontCacheHeader:

@@ -28,6 +28,7 @@
 {.emit: """#include "vendor/picohttpparser/picohttpparser.h"""".}
 
 import strtabs
+import httpcore
 
 #when defined(_MSC_VER): 
 #  const 
@@ -159,3 +160,15 @@ converter toStringTableRef*(x: seq[phr_header]): StringTableRef =
         copyMem(addr(value[0]), phr_header.value, phr_header.value_len)
 
         result[name] = value
+
+converter toHttpHeaders*(x: seq[phr_header]): HttpHeaders =
+    result = newHttpHeaders()
+
+    for phr_header in x:
+        var name = newString(phr_header.name_len)
+        var value = newString(phr_header.value_len)
+
+        copyMem(addr(name[0]), phr_header.name, phr_header.name_len)
+        copyMem(addr(value[0]), phr_header.value, phr_header.value_len)
+
+        result.add(name, value)
