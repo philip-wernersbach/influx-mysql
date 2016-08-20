@@ -26,11 +26,6 @@ import snappy as snappy
 import stdlib_extra
 import reflists
 import microasynchttpserver
-import qsqldatabase
-import qvariant
-import qttimespec
-import qdatetime
-import qsqlrecord
 import influxql_to_sql
 import influx_line_protocol_to_sql
 import influx_mysql_backend

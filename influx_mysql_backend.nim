@@ -6,7 +6,6 @@ import qt5_qtsql
 
 import stdlib_extra
 import reflists
-import qsqldatabase
 import influx_line_protocol_to_sql
 
 type
