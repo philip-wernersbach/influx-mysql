@@ -2,7 +2,7 @@
 
 import sets
 
-import qdatetime
+import qt5_qtsql
 
 import influxql_to_sql
 
