@@ -494,6 +494,9 @@ proc withCorsIfNeeded(headers: HttpHeaders, allowMethods: string): HttpHeaders =
     else:
         result = headers.withCorsIfNeeded(allowMethods, nil)
 
+template withCorsIfNeeded(headers: HttpHeaders, allowMethod: HttpMethod): HttpHeaders =
+    headers.withCorsIfNeeded($allowMethod)
+
 proc getOrHeadPing(request: Request): Future[void] =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
     result = request.respond(Http204, "", PING_RESPONSE_HEADERS.withCorsIfNeeded(PING_HTTP_METHODS))
@@ -655,14 +658,7 @@ proc respondError(request: Request, e: ref Exception, eMsg: string) =
     stderr.write("Error: unhandled exception: ")
     stderr.writeLine(eMsg)
 
-    var errorResponseHeaders = JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS
-
-    if request.reqMethod != nil:
-        errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(request.reqMethod.toUpper)
-    else:
-        errorResponseHeaders = errorResponseHeaders.withCorsIfNeeded(nil)
-
-    asyncCheck request.respond(Http400, $( %*{ "error": eMsg } ), errorResponseHeaders)
+    asyncCheck request.respond(Http400, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
 
 proc postReadLines(context: ReadLinesFutureContext not nil) =
     try:
@@ -836,22 +832,22 @@ proc router(request: Request): Future[void] =
             stdout.write('?')
             stdout.writeLine(request.url.query)
 
-        if (request.reqMethod == "get") and (request.url.path == "/query"):
+        if (request.reqMethod == HttpGet) and (request.url.path == "/query"):
             result.complete
             request.getQuery.callback = (x: Future[void]) => routerHandleError(request, x)
             return
-        elif (request.reqMethod == "post") and (request.url.path == "/write"):
+        elif (request.reqMethod == HttpPost) and (request.url.path == "/write"):
             request.postWrite(result)
             return
-        elif (request.reqMethod == "post") and (request.url.path == "/query"):
+        elif (request.reqMethod == HttpPost) and (request.url.path == "/query"):
             result.complete
             request.postQuery.callback = (x: Future[void]) => routerHandleError(request, x)
             return
-        elif ((request.reqMethod == "get") or (request.reqMethod == "head")) and (request.url.path == "/ping"):
+        elif ((request.reqMethod == HttpGet) or (request.reqMethod == HttpHead)) and (request.url.path == "/ping"):
             result.complete
             request.getOrHeadPing.callback = (x: Future[void]) => routerHandleError(request, x)
             return
-        elif (request.reqMethod == "options") and (corsAllowOrigin != nil):
+        elif (request.reqMethod == HttpOptions) and (corsAllowOrigin != nil):
             result.complete
 
             case request.url.path:
@@ -871,10 +867,10 @@ proc router(request: Request): Future[void] =
             result.complete
 
         # Fall through on purpose, we didn't have a matching route.
-        let responseMessage = "Route not found for [reqMethod=" & request.reqMethod & ", url=" & request.url.path & "]"
+        let responseMessage = "Route not found for [reqMethod=" & $request.reqMethod & ", url=" & request.url.path & "]"
         stdout.writeLine(responseMessage)
 
-        request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod.toUpper)).callback = (x: Future[void]) => routerHandleError(request, x)
+        request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod)).callback = (x: Future[void]) => routerHandleError(request, x)
     except IOError, ValueError, TimeoutError:
         if not result.finished:
             result.complete
