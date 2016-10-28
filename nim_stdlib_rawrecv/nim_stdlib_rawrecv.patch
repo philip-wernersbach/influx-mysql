@@ -1,0 +1,54 @@
+diff -upr a/lib/posix/linux.nim b/lib/posix/linux.nim
+--- a/lib/posix/linux.nim	2016-01-19 05:14:28.000000000 -0500
++++ b/lib/posix/linux.nim	2016-01-19 11:36:49.791687173 -0500
+@@ -22,6 +22,8 @@ const
+   CLONE_CHILD_SETTID* = 0x01000000
+   CLONE_STOPPED* = 0x02000000
+ 
++  MSG_DONTWAIT* = 0x40
++
+ # fn should be of type proc (a2: pointer): void {.cdecl.}
+ proc clone*(fn: pointer; child_stack: pointer; flags: cint;
+             arg: pointer; ptid: ptr Pid; tls: pointer;
+diff -upr a/lib/pure/asyncnet.nim b/lib/pure/asyncnet.nim
+--- a/lib/pure/asyncnet.nim	2016-01-19 05:14:28.000000000 -0500
++++ b/lib/pure/asyncnet.nim	2016-01-19 11:35:21.862321923 -0500
+@@ -537,6 +537,38 @@ proc isClosed*(socket: AsyncSocket): boo
+   ## Determines whether the socket has been closed.
+   return socket.closed
+ 
++proc recvWholeBuffer*(socket: AsyncSocket): string =
++  let leftInBuffer = socket.bufLen - socket.currPos
++
++  if leftInBuffer > 0:
++    result = newString(leftInBuffer)
++
++    copyMem(addr(result[0]), addr(socket.buffer[socket.currPos]), leftInBuffer)
++    socket.currPos.inc(leftInBuffer)
++  else:
++    result = newString(0)
++
++import posix
++
++proc rawRecv*(socket: AsyncSocket, result: var string, toRead: int, flags = cint(0)) =
++  result.setLen(toRead)
++
++  let read = socket.fd.recv(addr(result[0]), toRead, flags)
++
++  if read > 0:
++    result.setLen(read)
++  elif read < 0:
++    if errno == EAGAIN:
++      result.setLen(0)
++    else:
++      raise newException(IOError, "Failed to read from socket! (Errno: \"" & $(errno.strerror) & "\"")
++  elif read == 0:
++    raise newException(IOError, "Socket is disconnected!")
++
++proc rawRecv*(socket: AsyncSocket, toRead: int): string =
++  result = newString(toRead)
++  socket.rawRecv(result, toRead)
++
+ when not defined(testing) and isMainModule:
+   type
+     TestCases = enum
