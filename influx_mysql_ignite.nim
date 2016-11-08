@@ -53,7 +53,7 @@ jnimport:
 
     # Import method declaration
     proc main(clazz: typedesc[InfluxMysqlIgnite], args: openarray[string])
-    proc new(clazz: typedesc[InfluxMysqlIgnite], batchPointsBufferId: jint): InfluxMysqlIgnite
+    proc new(clazz: typedesc[InfluxMysqlIgnite], batchPointsBufferId: jint, confDirPath: string): InfluxMysqlIgnite
 
     proc shutdown(obj: InfluxMysqlIgnite)
 
@@ -223,21 +223,22 @@ proc compressedBatchPointsProcessor() =
         stdout.writeLine("Shutting down, waiting for influx_mysql_ignite worker threads to exit... done.")
 
 proc quitUsage() =
-    stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> \"\" <batch points buffer id> [-- java arguments]")
+    stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> \"\" <batch points buffer id> <configuration directory path> [-- java arguments]")
     quit(QuitFailure)
 
 cmdlineMain():
-    if params < 3:
+    if params < 4:
         stderr.writeLine("Error: Not enough arguments specified!")
         quitUsage()
-    elif (params >= 4) and (paramStr(4) != "--"):
+    elif (params >= 5) and (paramStr(5) != "--"):
         stderr.writeLine("Error: \"--\" must be fourth argument!")
         quitUsage()
 
     let bufferId = jint(paramStr(3).parseInt)
+    let confDirPath = paramStr(4)
 
-    var jvmArgs = if params >= 7:
-            commandLineParams()[5..params-1]
+    var jvmArgs = if params >= 8:
+            commandLineParams()[6..params-1]
         else:
             @[]
 
@@ -251,7 +252,8 @@ cmdlineMain():
 
         i += 1
 
-    jvmArgs.delete(i-1)
+    if jvmArgs.len > 0:
+      jvmArgs.delete(i-1)
 
     # Initialize thread-local stuff
     initInfluxLineProtocolToSQL()
@@ -262,7 +264,7 @@ cmdlineMain():
     currentEnv.PushLocalFrame(2)
 
     try:
-        let i = InfluxMysqlIgnite.new(bufferId)
+        let i = InfluxMysqlIgnite.new(bufferId, confDirPath)
 
         compressedBatchPointsProcessor()
         i.shutdown
