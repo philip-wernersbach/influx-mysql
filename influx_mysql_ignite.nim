@@ -236,22 +236,19 @@ cmdlineMain():
 
     let bufferId = jint(paramStr(3).parseInt)
 
-    var jvmArgs = if params >= 7:
-            commandLineParams()[5..params-1]
-        else:
-            @[]
+    var jvmArgs: seq[string] = @[]
 
-    var i = 0
-    while i < jvmArgs.len:
-        if jvmArgs[i] == "-classpath":
-            jvmArgs.delete(i)
-            jvmArgs[i] = "-Djava.class.path=" & jvmArgs[i]
-        elif jvmArgs[i].strip == "":
-            jvmArgs.delete(i)
+    if params > 5:
+        var classpathFixup = false
 
-        i += 1
-
-    jvmArgs.delete(i-1)
+        for arg in commandLineParams()[5..params-1]:
+            if classpathFixup:
+                jvmArgs.add("-Djava.class.path=" & arg)
+                classpathFixup = false
+            elif arg == "-classpath":
+                classpathFixup = true
+            elif arg.startsWith("-D"):
+                jvmArgs.add(arg)
 
     # Initialize thread-local stuff
     initInfluxLineProtocolToSQL()
