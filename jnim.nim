@@ -252,7 +252,7 @@ template FindClass(env: JNIEnvPtr, env2: JNIEnvPtr, name: cstring): jclass = env
 template GetStringUTFChars(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, isCopy: ptr jboolean): cstring = env.functions.GetStringUTFChars(env2, s, isCopy)
 template ReleaseStringUTFChars*(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, cstr: cstring) = env.functions.ReleaseStringUTFChars(env2, s, cstr)
 template GetArrayLength*(env: JNIEnvPtr, env2: JNIEnvPtr, j: jarray): jsize = env.functions.GetArrayLength(env2, j)
-template NewStringUTF*(env: JNIEnvPtr, env2: JNIEnvPtr, s: cstring): jstring = env.functions.NewStringUTF(env2, s)
+template NewStringUTF(env: JNIEnvPtr, env2: JNIEnvPtr, s: cstring): jstring = env.functions.NewStringUTF(env2, s)
 template SetObjectArrayElement(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jobjectArray, index: jsize, val: jobject) = env.functions.SetObjectArrayElement(env2, arr, index, val)
 template DeleteLocalRef(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject) = env.functions.DeleteLocalRef(env2, obj)
 proc NewObjectA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = env.functions.NewObjectA(env2, clazz, methodID, args)
@@ -547,10 +547,10 @@ template callVoidMethod*(env: JNIEnvPtr, clazz: jclass, methodID: jmethodID, arg
     env.callStaticVoidMethod(clazz, methodID, args)
 
 template toJValue*(s: string, res: var jvalue) =
-    res.l = cast[jobject](currentEnv.newString(s))
+    res.l = currentEnv.newString(s)
 
 template toJValue*(s: cstring, res: var jvalue) =
-    res.l = cast[jobject](currentEnv.newString(s))
+    res.l = currentEnv.newString(s)
 
 #template toJValue*(i: int, res: var jvalue) = res.i = i.jint
 
