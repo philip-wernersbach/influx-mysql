@@ -291,7 +291,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
     useDB(dbName, dbUsername, dbPassword):
         block:
-            "SET time_zone='UTC'".useQuery(database)
+            "SET time_zone='+0:00'".useQuery(database)
 
         sql.useQuery(database)
 

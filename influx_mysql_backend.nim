@@ -94,7 +94,7 @@ template useQuery*(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
 proc runDBQueryWithTransaction*(sql: cstring, dbName: cstring, dbUsername: cstring, dbPassword: cstring) =
     useDB(dbName, dbUsername, dbPassword):
         block:
-            "SET time_zone='UTC'".useQuery(database)
+            "SET time_zone='+0:00'".useQuery(database)
 
         database.beginTransaction
         sql.useQuery(database)
