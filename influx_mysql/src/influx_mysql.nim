@@ -25,6 +25,7 @@ import snappy as snappy
 
 import stdlib_extra
 import reflists
+import vendor/picohttpparser_c
 import microasynchttpserver
 import influxql_to_sql
 import influx_line_protocol_to_sql
