@@ -1,3 +1,12 @@
+# influx_line_protocol_to_sql.nim
+# Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
+#
+# Copyright (c) 2016, Philip Wernersbach
+#
+# The source code in this file is licensed under the 2-Clause BSD License.
+# See the LICENSE file in this project's root directory for the license
+# text.
+
 import strutils
 import hashes as hashes
 import tables
