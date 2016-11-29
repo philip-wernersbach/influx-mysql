@@ -5,7 +5,6 @@ BSD License, with the following exceptions:
 
 * These files are licensed under the MIT License:
 	* `influx_mysql/src/reflists.nim`
-	* `influx_mysql/src_upstream_modified/jnim.nim`
 	* `influx_mysql/src_upstream_modified/extra/parseutils_extra.nim`
 	* `influx_mysql/src_upstream_modified/extra/stdlib_extra.nim`
 	* `influx_mysql/src_upstream_modified/extra/strutils_extra.nim`
