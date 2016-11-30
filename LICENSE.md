@@ -21,5 +21,8 @@ BSD License, with the following exceptions:
 * These files are licensed under the 3-Clause BSD License:
 	* `influx_mysql/src_upstream_modified/snappy.nim`
 
+* These files are licensed under the Apache License, Version 2.0:
+	* `grafana_influxdb_dont_quote_everything.patch`
+
 For the full text of the 2-Clause BSD License, see `2-Clause_BSD_License.txt`.
 For files under other licenses, see the top of the file for the license text.

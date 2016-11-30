@@ -112,6 +112,24 @@ The third argument is for setting the
 `Access-Control-Allow-Origin` HTTP header. This is only relevant if your setup
 involves client browsers talking directly with the influx-mysql server.
 
+## Usage with Grafana
+
+influx-mysql can be used with [Grafana](https://github.com/grafana/grafana).
+This requires applying the `grafana_influxdb_dont_quote_everything.patch` patch
+to your Grafana sources. This patch modifies Grafana's InfluxQL generator, and
+is incompatible with the reference InfluxDB server from InfluxData.
+
+After the patch is applied, you can use influx-mysql with Grafana by setting up
+an InfluxDB datasource in Grafana, with the URL pointing to the influx-mysql
+server.
+
+The Grafana patch is necessary because InfluxQL statements can literally have
+everything quoted (column names, integers, literals, etc.), and InfluxDB will
+parse the statement and then convert the quoted strings into the proper types.
+SQL databases will happily accept these statements, but the behavior is
+undefined when you do SQL comparisons with the quoted strings and the properly
+typed database columns.
+
 ## Example Usage Scenario
 
 Usage of influx-mysql is fairly straight forward, and involves no
