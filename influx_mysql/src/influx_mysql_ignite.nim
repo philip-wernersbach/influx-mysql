@@ -19,6 +19,7 @@ import jnim
 import influx_line_protocol_to_sql
 import influx_mysql_cmdline
 import influx_mysql_backend
+import influx_mysql_backend_db
 
 const MAX_SERVER_SUBMIT_THREADS = 16
 
@@ -73,6 +74,7 @@ jnimport:
     proc getUsername(obj: CompressedBatchPoints): jstring
     proc getPassword(obj: CompressedBatchPoints): jstring
     proc getDatabase(obj: CompressedBatchPoints): jstring
+    proc getSQLInsertType(obj: CompressedBatchPoints): jint
     proc compressedSchemaLineProtocol(obj: CompressedBatchPoints): jByteArray
     proc compressedLineProtocol(obj: CompressedBatchPoints): jByteArray
 
@@ -82,7 +84,7 @@ template PushLocalFrame*(env: JNIEnvPtr, capacity: jint) =
 
 iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBatchPoints {.inline.} =
     while true:
-        currentEnv.PushLocalFrame(7)
+        currentEnv.PushLocalFrame(8)
 
         try:
             yield queue.take
@@ -163,6 +165,14 @@ proc compressedBatchPointsProcessor() =
             let databaseObj = points.getDatabase
             let databaseString = databaseObj.cstringFromJstring(currentEnv, currentEnv)
 
+            let sqlInsertType = case points.getSQLInsertType:
+                of 1:
+                    SQLInsertType.INSERT
+                of 2:
+                    SQLInsertType.REPLACE
+                else:
+                    SQLInsertType.NONE
+
             var context: ReadLinesContext
 
             let cslpObj = points.compressedSchemaLineProtocol
@@ -190,7 +200,7 @@ proc compressedBatchPointsProcessor() =
                 snappy.uncompressValidatedInputInto(cast[cstring](cslpArray), parallelContext.lineProtocol, cslpLen, cslpUncompressedLen, 0)
                 snappy.uncompressValidatedInputInto(cast[cstring](clpArray), parallelContext.lineProtocol, clpLen, clpUncompressedLen, cslpUncompressedLen)
 
-                context = newReadLinesContext(false, true, nil)
+                context = newReadLinesContext(false, sqlInsertType, true, nil)
                 context.lines.shallowCopy(parallelContext.lineProtocol)
             finally:
                 currentEnv.ReleaseByteArrayElements(currentEnv, clpObj, clpArray, JNI_ABORT)

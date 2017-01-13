@@ -181,7 +181,7 @@ in
 	influx-mysql-ignite =
 		stdenv.mkDerivation rec {
 			name = "influx-mysql-ignite-${version}";
-			version = "1.0.0";
+			version = "1.0.1";
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
