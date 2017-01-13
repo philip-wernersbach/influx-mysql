@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2016 Philip Wernersbach
+Copyright (c) 2017 Philip Wernersbach
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -141,6 +141,39 @@ in
 			installPhase = ''
 				mkdir -p $out/bin
 				cp bin/influxql_to_sql_cli $out/bin
+			'';
+		}
+	;
+
+	influx-line-protocol-to-sql-cli =
+		stdenv.mkDerivation rec {
+			name = "influx-line-protocol-to-sql-cli-${version}";
+			version = "1.0.0";
+
+			src = [ ./influx_mysql ./influx_mysql.nimble ];
+
+			buildInputs = [ influx-mysql-deps cacert git nimble nim ];
+
+			unpackCmd = customUnpackCmd;
+
+			buildPhase = ''
+				export GIT_SSL_CAINFO=${cacert}/etc/ssl/certs/ca-bundle.crt
+
+				rm -Rf .git
+
+				mkdir -p bin/
+
+				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nimble}/bin/nimble -y c \
+					--cincludes:${snappy}/include \
+					--passL:"-L${snappy}/lib" \
+					--gc:${nimGc} ${nimAdditionalOptions} \
+					--out:bin/influx_line_protocol_to_sql_cli \
+					influx_mysql/src/influx_line_protocol_to_sql_cli
+			'';
+
+			installPhase = ''
+				mkdir -p $out/bin
+				cp bin/influx_line_protocol_to_sql_cli $out/bin
 			'';
 		}
 	;

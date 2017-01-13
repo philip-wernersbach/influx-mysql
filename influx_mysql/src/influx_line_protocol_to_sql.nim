@@ -1,7 +1,7 @@
 # influx_line_protocol_to_sql.nim
 # Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
 #
-# Copyright (c) 2016, Philip Wernersbach
+# Copyright (c) 2017, Philip Wernersbach
 #
 # The source code in this file is licensed under the 2-Clause BSD License.
 # See the LICENSE file in this project's root directory for the license
@@ -35,6 +35,13 @@ type
         bstring: seq[string]
         keyAndTagsList: seq[int]
         fieldsList: seq[int]
+
+    SQLInsertType* {.pure.} = enum
+        NONE
+        INSERT,
+        REPLACE
+
+    SQLInsertTypeInvalidException = object of ValueError
 
 when not compileOption("threads"):
     var booleanTrueValue = "TRUE"
@@ -350,19 +357,26 @@ proc lineProtocolToSQLEntryValues*(entry: string, result: var Table[ref string, 
 
     result[keyInterned].entries.append(entryValues)
 
-proc newSQLTableInsert(tableName: string): SQLTableInsert {.inline.} =
+proc newSQLTableInsert(tableName: string, insertType: SQLInsertType): SQLTableInsert {.inline.} =
     result = (firstEntry: true, order: cast[OrderedTableRef[string, int] not nil](newOrderedTable[string, int]()),
         sql: cast[string not nil](newStringOfCap(SCHEMAFUL_SQL_BUFFER_SIZE)))
 
     result.order["time"] = result.order.len
 
     # Add header
-    result.sql.add("INSERT INTO ")
+    case insertType:
+    of SQLInsertType.INSERT:
+        result.sql.add("INSERT INTO ")
+    of SQLInsertType.REPLACE:
+        result.sql.add("REPLACE INTO ")
+    of SQLInsertType.NONE:
+        raise newException(SQLInsertTypeInvalidException, "No SQL insert type specified!")
+
     result.sql.add(tableName)
     result.sql.add(" (")
 
 proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref SQLTableInsert], entryValues: var seq[string],
-    bop: var LineProtocolBufferObjectPool) {.gcsafe.} =
+    bop: var LineProtocolBufferObjectPool, insertType: SQLInsertType) {.gcsafe.} =
 
     var schemaLine = false
     var bstringSeqLen = bop.bstring.len
@@ -390,7 +404,7 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
     if not result.hasKey(bop.bstring[1]):
         var newInsert: ref SQLTableInsert
         new(newInsert)
-        newInsert[] = newSQLTableInsert(bop.bstring[1])
+        newInsert[] = newSQLTableInsert(bop.bstring[1], insertType)
 
         result[bop.bstring[1]] = newInsert
         schemaLine = true
@@ -519,9 +533,16 @@ template addSQLStatementDelimiter*(result: var string) =
     # Add SQL statement delimiter
     result.add(";\n")
 
-proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string) =
+proc sqlEntryValuesToSQL*(kv: tuple[key: ref string, value: SQLEntryValues], result: var string, insertType: SQLInsertType) =
     # Add header
-    result.add("INSERT INTO ")
+    case insertType:
+    of SQLInsertType.INSERT:
+        result.add("INSERT INTO ")
+    of SQLInsertType.REPLACE:
+        result.add("REPLACE INTO ")
+    of SQLInsertType.NONE:
+        raise newException(SQLInsertTypeInvalidException, "No SQL insert type specified!")
+
     result.add(kv.key[])
 
     result.add(" (")

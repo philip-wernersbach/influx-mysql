@@ -1,7 +1,7 @@
 # influx_mysql.nim
 # Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
 #
-# Copyright (c) 2016, Philip Wernersbach
+# Copyright (c) 2017, Philip Wernersbach
 #
 # The source code in this file is licensed under the 2-Clause BSD License.
 # See the LICENSE file in this project's root directory for the license
@@ -39,6 +39,7 @@ import microasynchttpserver
 import influxql_to_sql
 import influx_line_protocol_to_sql
 import influx_mysql_backend
+import influx_mysql_backend_db
 import influx_mysql_cmdline
 
 type
@@ -765,7 +766,9 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     var context: ReadLinesFutureContext not nil
     new(context, destroyReadLinesFutureContext)
-    context[] = (super: newReadLinesContext(compressed, ("true" == params.getOrDefault("schemaful")), nil), 
+    context[] = (super: newReadLinesContext(compressed,
+            if "replace" != params.getOrDefault("sql_insert_type"): SQLInsertType.INSERT else: SQLInsertType.REPLACE,
+            ("true" == params.getOrDefault("schemaful")), nil),
         contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params, retFuture: result, routerResult: routerResult)
 
     context.super.lines = request.client.recvWholeBuffer
@@ -798,7 +801,7 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
             if context.super.schemaful != nil:
                 context.super.schemaful.inserts.processSQLTableInsertsAndRunDBQuery(dbName, dbUsername, dbPassword)
             else:
-                context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(dbName, dbUsername, dbPassword)
+                context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(context.super.sqlInsertType, dbName, dbUsername, dbPassword)
 
             asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 

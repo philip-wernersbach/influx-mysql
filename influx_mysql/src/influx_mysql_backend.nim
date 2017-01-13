@@ -1,25 +1,20 @@
 # influx_mysql_backend.nim
 # Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
 #
-# Copyright (c) 2016, Philip Wernersbach
+# Copyright (c) 2017, Philip Wernersbach
 #
 # The source code in this file is licensed under the 2-Clause BSD License.
 # See the LICENSE file in this project's root directory for the license
 # text.
 
-import macros
 import strutils
 import tables
-
-import qt5_qtsql
 
 import stdlib_extra
 import reflists
 import influx_line_protocol_to_sql
 
 type
-    DBQueryException* = object of IOError
-
     ReadLinesContextSchemaless = ref tuple
         internedStrings: Table[string, ref string]
         entries: Table[ref string, SQLEntryValues]
@@ -31,86 +26,12 @@ type
     ReadLinesContext* = tuple
         compressed: bool
         destroyed: bool
+        sqlInsertType: SQLInsertType
         line: string
         lines: string
         schemaless: ReadLinesContextSchemaless
         schemaful: ReadLinesContextSchemaful
         bop: LineProtocolBufferObjectPool
-
-var dbHostname*: cstring = nil
-var dbPort*: cint = 0
-
-macro useDB*(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
-    # Create the try block that closes the database.
-    var safeBodyClose = newNimNode(nnkTryStmt)
-    safeBodyClose.add(body)
-
-    ## Create the finally clause
-    var safeBodyCloseFinally = newNimNode(nnkFinally)
-    safeBodyCloseFinally.add(parseStmt("database.close"))
-    
-    ## Add the finally clause to the try block.
-    safeBodyClose.add(safeBodyCloseFinally)
-
-    # Create the try block that removes the database.
-    var safeBodyRemove = newNimNode(nnkTryStmt)
-    safeBodyRemove.add(
-        newBlockStmt(
-            newStmtList(
-                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("QMYSQL"), newIdentNode(!"qSqlDatabaseName"))),
-                newCall(!"setHostName", newIdentNode(!"database"), newIdentNode(!"dbHostName")),
-                newCall(!"setDatabaseName", newIdentNode(!"database"), dbName),
-                newCall(!"setPort", newIdentNode(!"database"), newIdentNode(!"dbPort")),
-                newCall(!"open", newIdentNode(!"database"), dbUsername, dbPassword),
-                safeBodyClose
-            )
-        )
-    )
-
-    ## Create the finally clause.
-    var safeBodyRemoveFinally = newNimNode(nnkFinally)
-    safeBodyRemoveFinally.add(parseStmt("qSqlDatabaseRemoveDatabase(qSqlDatabaseName)"))
-
-    ## Add the finally clause to the try block.
-    safeBodyRemove.add(safeBodyRemoveFinally)
-
-    # Put it all together.
-    result = newBlockStmt(
-                newStmtList(
-                    parseStmt("""
-
-var qSqlDatabaseStackId: uint8
-var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
-                    """), 
-                    safeBodyRemove
-                )
-            )
-
-template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
-    try:
-        query.prepare(sql)
-        query.exec
-    except QSqlException:
-        var exceptionMsg = cast[string](getCurrentExceptionMsg())
-        var newExceptionMsg = exceptionMsg.strdup
-
-        raise newException(DBQueryException, newExceptionMsg)
-
-template useQuery*(sql: cstring, database: var QSqlDatabaseObj) {.dirty.} =
-    var query = database.qSqlQuery()
-    sql.useQuery(query)
-
-proc runDBQueryWithTransaction*(sql: cstring, dbName: cstring, dbUsername: cstring, dbPassword: cstring) =
-    useDB(dbName, dbUsername, dbPassword):
-        block:
-            "SET time_zone='+0:00'".useQuery(database)
-
-        database.beginTransaction
-        sql.useQuery(database)
-        database.commitTransaction
-
-        # Workaround for weird compiler corner case
-        database.close
 
 proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
     var lineStart = 0
@@ -131,7 +52,7 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
                 stdout.writeLine(context.line)
 
             if context.schemaful != nil:
-                context.line.lineProtocolToSQLTableInsert(context.schemaful.inserts, context.schemaful.entryValues, context.bop)
+                context.line.lineProtocolToSQLTableInsert(context.schemaful.inserts, context.schemaful.entryValues, context.bop, context.sqlInsertType)
             else:
                 context.line.lineProtocolToSQLEntryValues(context.schemaless.entries, context.schemaless.internedStrings, context.bop)
 
@@ -145,40 +66,32 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
     else:
         context.lines.setLen(0)
 
-proc processSQLEntryValuesAndRunDBQuery*(entries: var Table[ref string, SQLEntryValues], dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
-    var sql = newStringOfCap(SQL_BUFFER_SIZE)
+template processSQLEntryValues*(entries: var Table[ref string, SQLEntryValues], insertType: SQLInsertType, callbackBlock: untyped) =
+    var sql {.inject.} = newStringOfCap(SQL_BUFFER_SIZE)
 
     for pair in entries.pairs:
-        pair.sqlEntryValuesToSQL(sql)
+        pair.sqlEntryValuesToSQL(sql, insertType)
 
-        when defined(logrequests):
-            stdout.write("/write: ")
-            stdout.writeLine(sql)
-
-        sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
+        callbackBlock
         sql.setLen(0)
 
-proc processSQLTableInsertsAndRunDBQuery*(inserts: var Table[string, ref SQLTableInsert], dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
+template processSQLTableInserts*(inserts: var Table[string, ref SQLTableInsert], callbackBlock: untyped) =
     # Iterating over the keys is a workaround, Nim generates the wrong code in C++ mode for
     # tables.mvalues
     for insertKey in inserts.keys:
-        var insert = inserts[insertKey]
+        var insert {.inject.} = inserts[insertKey]
 
         insert.sql.addSQLStatementDelimiter
 
-        when defined(logrequests):
-            stdout.write("/write: ")
-            stdout.writeLine(insert.sql)
+        callbackBlock
 
-        insert.sql.runDBQueryWithTransaction(dbName, dbUsername, dbPassword)
-
-proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): ReadLinesContext {.inline.} =
+proc newReadLinesContext*(compressed: bool, sqlInsertType: SQLInsertType, schemaful: bool, lines: string): ReadLinesContext {.inline.} =
     if schemaful:
         var schemafulContext: ReadLinesContextSchemaful
         new(schemafulContext)
         schemafulContext[] = (entryValues: newSeq[string](1), inserts: initTable[string, ref SQLTableInsert]())
 
-        result = (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext,
+        result = (compressed: compressed, destroyed: false, sqlInsertType: sqlInsertType, line: "", lines: lines, schemaless: ReadLinesContextSchemaless(nil), schemaful: schemafulContext,
             bop: (freeBstring: 2, bstring: newSeq[string](3), keyAndTagsList: newSeq[int](), fieldsList: newSeq[int]()))
 
         result.schemaful.entryValues[0] = newStringOfCap(64)
@@ -198,7 +111,7 @@ proc newReadLinesContext*(compressed: bool, schemaful: bool, lines: string): Rea
         new(schemalessContext)
         schemalessContext[] = (internedStrings: internedStrings, entries: initTable[ref string, SQLEntryValues]())
 
-        result = (compressed: compressed, destroyed: false, line: "", lines: lines, schemaless: schemalessContext, schemaful: ReadLinesContextSchemaful(nil),
+        result = (compressed: compressed, destroyed: false, sqlInsertType: sqlInsertType, line: "", lines: lines, schemaless: schemalessContext, schemaful: ReadLinesContextSchemaful(nil),
             bop: (freeBstring: 1, bstring: newSeq[string](2), keyAndTagsList: newSeq[int](), fieldsList: newSeq[int]()))
 
         result.bop.bstring[0] = newStringOfCap(64)
