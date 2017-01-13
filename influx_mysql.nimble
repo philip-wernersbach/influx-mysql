@@ -1,6 +1,6 @@
 [Package]
 
-version       = "1.0.0"
+version       = "1.0.1"
 author        = "Philip Wernersbach"
 description   = "A server that translates between InfluxDB and MySQL protocol, and InfluxQL to SQL."
 license       = "BSD 2-Clause"

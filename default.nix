@@ -54,7 +54,7 @@ let
 	influx-mysql-deps =
 		stdenv.mkDerivation rec {
 			name = "influx-mysql-deps-${version}";
-			version = "1.0.0";
+			version = "1.0.1";
 
 			src = ./influx_mysql.nimble;
 
@@ -82,7 +82,7 @@ in
 	influx-mysql =
 		stdenv.mkDerivation rec {
 			name = "influx-mysql-${version}";
-			version = "1.0.0";
+			version = "1.0.1";
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
@@ -115,7 +115,7 @@ in
 	influxql-to-sql-cli =
 		stdenv.mkDerivation rec {
 			name = "influxql-to-sql-cli-${version}";
-			version = "1.0.0";
+			version = "1.0.1";
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
@@ -148,7 +148,7 @@ in
 	influx-line-protocol-to-sql-cli =
 		stdenv.mkDerivation rec {
 			name = "influx-line-protocol-to-sql-cli-${version}";
-			version = "1.0.0";
+			version = "1.0.1";
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
