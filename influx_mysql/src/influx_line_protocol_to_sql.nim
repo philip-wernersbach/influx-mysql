@@ -386,11 +386,12 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
     let fieldsStart = keyAndTagsLen + 1
     let fieldsLen = entry.getTokenLen(' ', fieldsStart)
     let fieldsEnd = fieldsStart + fieldsLen
+    let timestampStart = fieldsEnd + 1
 
     bop.freeBstring = 2
 
     # bop.bstring[0] = timestamp
-    entry.getTokenInto(bop.bstring[0], ' ', fieldsEnd + 1)
+    entry.getTokenInto(bop.bstring[0], ' ', timestampStart)
 
     # bop.bstring[1] = key
     entry.getTokenInto(bop.bstring[1], {',', ' '}, 0)
@@ -403,8 +404,24 @@ proc lineProtocolToSQLTableInsert*(entry: string, result: var Table[string, ref 
 
     if not result.hasKey(bop.bstring[1]):
         var newInsert: ref SQLTableInsert
+        var newInsertType = insertType
+
+        let spmStart = bop.bstring[0].len + 1 + timestampStart
+            
+        if spmStart < entry.len:
+            # bop.bstring[2] = spm
+            entry.getTokenInto(bop.bstring[2], ' ', spmStart)
+
+            case bop.bstring[2]:
+            of "sql_insert_type=\"insert\"":
+                newInsertType = SQLInsertType.INSERT
+            of "sql_insert_type=\"replace\"":
+                newInsertType = SQLInsertType.REPLACE
+            else:
+               discard
+
         new(newInsert)
-        newInsert[] = newSQLTableInsert(bop.bstring[1], insertType)
+        newInsert[] = newSQLTableInsert(bop.bstring[1], newInsertType)
 
         result[bop.bstring[1]] = newInsert
         schemaLine = true
