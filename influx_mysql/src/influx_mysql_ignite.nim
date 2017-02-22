@@ -1,7 +1,7 @@
 # influx_mysql_ignite.nim
 # Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
 #
-# Copyright (c) 2016, Philip Wernersbach
+# Copyright (c) 2016-2017, Philip Wernersbach
 #
 # The source code in this file is licensed under the 2-Clause BSD License.
 # See the LICENSE file in this project's root directory for the license
@@ -59,17 +59,22 @@ jnimport:
     import com.github.philip_wernersbach.influx_mysql.ignite.InfluxMysqlIgnite
     import com.github.philip_wernersbach.influx_mysql.ignite.ProcessingProxy
     import com.github.philip_wernersbach.influx_mysql.ignite.mpi.CompressedBatchPoints
+    import java.util.concurrent.TimeUnit
     import java.util.concurrent.SynchronousQueue[T]
 
     # Import method declaration
     proc main(clazz: typedesc[InfluxMysqlIgnite], args: openarray[string])
     proc new(clazz: typedesc[InfluxMysqlIgnite], batchPointsBufferId: jint): InfluxMysqlIgnite
 
+    proc setupShutdownHandler(obj: InfluxMysqlIgnite)
+    proc continueRunning(obj: InfluxMysqlIgnite): bool
     proc shutdown(obj: InfluxMysqlIgnite)
 
     proc pointsQueue(clazz: typedesc[ProcessingProxy]): SynchronousQueue[CompressedBatchPoints] {.property.}
 
-    proc take[T](obj: SynchronousQueue[T]): T
+    proc MINUTES(clazz: typedesc[TimeUnit]): TimeUnit {.property.}
+
+    proc poll[T](obj: SynchronousQueue[T], timeout: jlong, unit: TimeUnit): T
 
     proc getUsername(obj: CompressedBatchPoints): jstring
     proc getPassword(obj: CompressedBatchPoints): jstring
@@ -82,12 +87,14 @@ template PushLocalFrame*(env: JNIEnvPtr, capacity: jint) =
     if unlikely(jnim.PushLocalFrame(env, capacity) != 0):
         raise newException(JavaOperationException, "JNI PushLocalFrame() failed!")
 
-iterator waitEach(queue: SynchronousQueue[CompressedBatchPoints]): CompressedBatchPoints {.inline.} =
-    while true:
+iterator waitEachWhileContinueRunning(queue: SynchronousQueue[CompressedBatchPoints], ignite: InfluxMysqlIgnite): CompressedBatchPoints {.inline.} =
+    let minutes = TimeUnit.MINUTES
+
+    while ignite.continueRunning:
         currentEnv.PushLocalFrame(8)
 
         try:
-            yield queue.take
+            yield queue.poll(8, minutes)
         finally:
             currentEnv.PopLocalFrameNullReturn
 
@@ -146,7 +153,7 @@ proc ensureParallelExecutionsCompleted(parallelContext: var ParallelExecutionCon
         currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastPasswordObj, parallelContext.lastPasswordString)
         currentEnv.ReleaseStringUTFChars(currentEnv, parallelContext.lastUsernameObj, parallelContext.lastUsernameString)
 
-proc compressedBatchPointsProcessor() =
+proc compressedBatchPointsProcessor(ignite: InfluxMysqlIgnite) =
     var parallelContext: ParallelExecutionContext
 
     parallelContext.hasLast = false
@@ -155,7 +162,10 @@ proc compressedBatchPointsProcessor() =
     parallelContext.lineProtocol = newStringOfCap(SQL_BUFFER_SIZE)
 
     try:
-        for points in ProcessingProxy.pointsQueue.waitEach:
+        for points in ProcessingProxy.pointsQueue.waitEachWhileContinueRunning(ignite):
+            if cast[jobject](points).isNil:
+                continue
+
             let usernameObj = points.getUsername
             let usernameString = usernameObj.cstringFromJstring(currentEnv, currentEnv)
 
@@ -264,24 +274,28 @@ cmdlineMain():
             if classpathFixup:
                 jvmArgs.add("-Djava.class.path=" & arg)
                 classpathFixup = false
-            elif arg == "-classpath":
-                classpathFixup = true
-            elif arg.startsWith("-D"):
-                jvmArgs.add(arg)
+            elif (arg.len >= 1) and (arg[0] == '-'):
+                if arg == "-classpath":
+                    classpathFixup = true
+                else:
+                    jvmArgs.add(arg)
 
     # Initialize thread-local stuff
     initInfluxLineProtocolToSQL()
 
     # Start an embedded JVM
-    let jvm = newJavaVM(jvmArgs)
+    var jvm = newJavaVM(jvmArgs)
 
-    currentEnv.PushLocalFrame(2)
+    currentEnv.PushLocalFrame(3)
 
     try:
         let i = InfluxMysqlIgnite.new(bufferId)
 
-        compressedBatchPointsProcessor()
-        i.shutdown
+        try:
+            i.setupShutdownHandler
+            i.compressedBatchPointsProcessor
+        finally:
+            i.shutdown
     except Exception:
         let e = getCurrentException()
         stderr.writeLine(e.getStackTrace() & "Error: unhandled exception: " & getCurrentExceptionMsg())
@@ -289,3 +303,4 @@ cmdlineMain():
         raise e
     finally:
         currentEnv.PopLocalFrameNullReturn
+        jvm.destroy

@@ -5,7 +5,7 @@
 #
 # The MIT License (MIT)
 #
-# Copyright (c) 2015-2016 Yuriy Glukhov & Philip Wernersbach
+# Copyright (c) 2015-2017 Yuriy Glukhov & Philip Wernersbach
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -24,6 +24,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+
 
 import dynlib
 import strutils
@@ -122,16 +123,21 @@ const JNINativeInterfaceImportName = when defined(android):
     else:
         "struct JNINativeInterface_"
 
-const JNIEnvImportName = when defined(android):
-        "struct JNIEnv"
+const JNIInvokeInterfaceImportName = when defined(android):
+        "struct JNIInvokeInterface"
     else:
-        "struct JNIEnv_"
+        "struct JNIInvokeInterface_"
+
+const JNIEnvImportName = "JNIEnv"
+const JavaVMImportName = "JavaVM"
 
 const JNI_COMMIT* = jint(1)
 const JNI_ABORT* = jint(2)
 
-type JavaVMPtr* {.header: jniHeader.} = pointer
 type
+    JNIJavaVM {.importc: JavaVMImportName, nodecl, header: jniHeader, incompleteStruct.} = object
+    JavaVMPtr* = ptr JNIJavaVM
+
     JNINativeInterface {.importc: JNINativeInterfaceImportName, nodecl, header: jniHeader, incompleteStruct.} = object
         reserved0: pointer
         reserved1: pointer
@@ -146,7 +152,6 @@ type
         NewStringUTF: proc(env: JNIEnvPtr, s: cstring): jstring {.cdecl.}
         GetStringUTFChars: proc(env: JNIEnvPtr, s: jstring, isCopy: ptr jboolean): cstring {.cdecl.}
         ReleaseStringUTFChars: proc(env: JNIEnvPtr, s: jstring, cstr: cstring) {.cdecl.}
-        GetArrayLength: proc(env: JNIEnvPtr, a: jarray): jsize {.cdecl.}
         GetMethodID: proc(env: JNIEnvPtr, clazz: jclass, name, sig: cstring): jmethodID {.cdecl.}
         GetFieldID: proc(env: JNIEnvPtr, clazz: jclass, name, sig: cstring): jfieldID {.cdecl.}
         GetStaticFieldID: proc(env: JNIEnvPtr, clazz: jclass, name, sig: cstring): jfieldID {.cdecl.}
@@ -217,6 +222,8 @@ type
         ExceptionDescribe: proc(env: JNIEnvPtr) {.cdecl.}
         ExceptionClear: proc(env: JNIEnvPtr) {.cdecl.}
 
+        GetArrayLength: proc(env: JNIEnvPtr, arr: jarray): jsize {.cdecl.}
+
         NewBooleanArray: proc(env: JNIEnvPtr, len: jsize): jbooleanArray {.cdecl.}
         NewByteArray: proc(env: JNIEnvPtr, len: jsize): jbyteArray {.cdecl.}
         NewCharArray: proc(env: JNIEnvPtr, len: jsize): jcharArray {.cdecl.}
@@ -270,86 +277,102 @@ type
         PushLocalFrame: proc(env: JNIEnvPtr, capacity: jint): jint {.cdecl.}
         PopLocalFrame: proc(env: JNIEnvPtr, ret: jobject): jobject {.cdecl.}
 
+    JNINativeInterfacePtr* = ptr JNINativeInterface
+
+    JNIInvokeInterface {.importc: JNIInvokeInterfaceImportName, nodecl, header: jniHeader, incompleteStruct.} = object
+        DestroyJavaVM: proc(vm: JavaVMPtr): jint {.cdecl.}
+        GetEnv: proc(vm: JavaVMPtr, penv: ptr pointer, version: jint): jint {.cdecl.}
+
+    JNIInvokeInterfacePtr = ptr JNIInvokeInterface
+
     JNIEnvPtr* = ptr JNIEnv
     JNIEnv* {.importc: JNIEnvImportName, nodecl, header: jniHeader, incompleteStruct.} = object
-        functions: ptr JNINativeInterface
 
-template FindClass(env: JNIEnvPtr, env2: JNIEnvPtr, name: cstring): jclass = env.functions.FindClass(env2, name)
-template GetStringUTFChars(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, isCopy: ptr jboolean): cstring = env.functions.GetStringUTFChars(env2, s, isCopy)
-template ReleaseStringUTFChars*(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, cstr: cstring) = env.functions.ReleaseStringUTFChars(env2, s, cstr)
-template GetArrayLength*(env: JNIEnvPtr, env2: JNIEnvPtr, j: jarray): jsize = env.functions.GetArrayLength(env2, j)
-template NewStringUTF(env: JNIEnvPtr, env2: JNIEnvPtr, s: cstring): jstring = env.functions.NewStringUTF(env2, s)
-template SetObjectArrayElement(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jobjectArray, index: jsize, val: jobject) = env.functions.SetObjectArrayElement(env2, arr, index, val)
-template DeleteLocalRef(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject) = env.functions.DeleteLocalRef(env2, obj)
-proc NewObjectA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = env.functions.NewObjectA(env2, clazz, methodID, args)
-proc CallStaticVoidMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue) {.inline.} = env.functions.CallStaticVoidMethodA(env2, clazz, methodID, args)
-proc CallVoidMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject, methodID: jmethodID, args: ptr jvalue) {.inline.} = env.functions.CallVoidMethodA(env2, obj, methodID, args)
-proc CallStaticObjectMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = env.functions.CallStaticObjectMethodA(env2, clazz, methodID, args)
-proc CallObjectMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = env.functions.CallObjectMethodA(env2, obj, methodID, args)
-proc CallStaticIntMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jint {.inline.} = env.functions.CallStaticIntMethodA(env2, clazz, methodID, args)
-proc CallIntMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jint {.inline.} = env.functions.CallIntMethodA(env2, clazz, methodID, args)
-proc CallStaticBooleanMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jboolean {.inline.} = env.functions.CallStaticBooleanMethodA(env2, clazz, methodID, args)
-proc CallBooleanMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jboolean {.inline.} = env.functions.CallBooleanMethodA(env2, clazz, methodID, args)
-proc CallStaticByteMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jbyte {.inline.} = env.functions.CallStaticByteMethodA(env2, clazz, methodID, args)
-proc CallByteMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jbyte {.inline.} = env.functions.CallByteMethodA(env2, clazz, methodID, args)
-proc CallStaticShortMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jshort {.inline.} = env.functions.CallStaticShortMethodA(env2, clazz, methodID, args)
-proc CallShortMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jshort {.inline.} = env.functions.CallShortMethodA(env2, clazz, methodID, args)
-proc CallStaticLongMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jlong {.inline.} = env.functions.CallStaticLongMethodA(env2, clazz, methodID, args)
-proc CallLongMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jlong {.inline.} = env.functions.CallLongMethodA(env2, clazz, methodID, args)
-proc CallStaticCharMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jchar {.inline.} = env.functions.CallStaticCharMethodA(env2, clazz, methodID, args)
-proc CallCharMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jchar {.inline.} = env.functions.CallCharMethodA(env2, clazz, methodID, args)
-proc CallStaticFloatMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jfloat {.inline.} = env.functions.CallStaticFloatMethodA(env2, clazz, methodID, args)
-proc CallFloatMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jfloat {.inline.} = env.functions.CallFloatMethodA(env2, clazz, methodID, args)
-proc CallStaticDoubleMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jdouble {.inline.} = env.functions.CallStaticDoubleMethodA(env2, clazz, methodID, args)
-proc CallDoubleMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jdouble {.inline.} = env.functions.CallDoubleMethodA(env2, clazz, methodID, args)
-template NewObjectArray(env: JNIEnvPtr, env2: JNIEnvPtr, size: jsize, clazz: jclass, init: jobject): jobjectArray = env.functions.NewObjectArray(env2, size, clazz, init)
-template GetObjectClass(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject): jclass = env.functions.GetObjectClass(env2, obj)
-template GetMethodID*(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, name, sig: cstring): jmethodID = env.functions.GetMethodID(env2, clazz, name, sig)
-template ExceptionOccurred(env: JNIEnvPtr, env2: JNIEnvPtr): jthrowable = env.functions.ExceptionOccurred(env2)
-template ExceptionClear(env: JNIEnvPtr, env2: JNIEnvPtr) = env.functions.ExceptionClear(env2)
-template GetStaticFieldID*(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, name, sig: cstring): jfieldID = env.functions.GetStaticFieldID(env2, clazz, name, sig)
-template GetStaticObjectField*(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jclass, fieldId: jfieldID): jobject = env.functions.GetStaticObjectField(env2, obj, fieldId)
-template PushLocalFrame*(env: JNIEnvPtr, env2: JNIEnvPtr, capacity: jint): jint = env.functions.PushLocalFrame(env2, capacity)
-template PopLocalFrame*(env: JNIEnvPtr, env2: JNIEnvPtr, ret: jobject): jobject = env.functions.PopLocalFrame(env2, ret)
-template GetByteArrayElements*(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jbyteArray, isCopy: ptr jboolean): ptr jbyte = env.functions.GetByteArrayElements(env2, arr, isCopy)
-template ReleaseByteArrayElements*(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jbyteArray, elems: ptr jbyte, mode: jint) = env.functions.ReleaseByteArrayElements(env2, arr, elems, mode)
+var nullJobject {.importc: "NULL", nodecl.}: jobject
+var nullJBooleanPtr {.importc: "NULL", nodecl.}: ptr jboolean
 
-proc NewObjectArrayNullInit(env: JNIEnvPtr, env2: JNIEnvPtr, size: jsize, clazz: jclass): jobjectArray {.inline.} =
-    {.emit: "`result` = (*(*`env`).functions).NewObjectArray(`env2`, `size`, `clazz`, NULL);".}
+template FindClass(env: JNIEnvPtr, env2: JNIEnvPtr, name: cstring): jclass = cast[ptr JNINativeInterfacePtr](env).FindClass(env2, name)
+template GetStringUTFChars(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, isCopy: ptr jboolean): cstring = cast[ptr JNINativeInterfacePtr](env).GetStringUTFChars(env2, s, isCopy)
+template ReleaseStringUTFChars*(env: JNIEnvPtr, env2: JNIEnvPtr, s: jstring, cstr: cstring) = cast[ptr JNINativeInterfacePtr](env).ReleaseStringUTFChars(env2, s, cstr)
+template GetArrayLength*(env: JNIEnvPtr, env2: JNIEnvPtr, j: jarray): jsize = cast[ptr JNINativeInterfacePtr](env).GetArrayLength(env2, j)
+template NewStringUTF*(env: JNIEnvPtr, env2: JNIEnvPtr, s: cstring): jstring = cast[ptr JNINativeInterfacePtr](env).NewStringUTF(env2, s)
+template SetObjectArrayElement(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jobjectArray, index: jsize, val: jobject) = cast[ptr JNINativeInterfacePtr](env).SetObjectArrayElement(env2, arr, index, val)
+template DeleteLocalRef(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject) = cast[ptr JNINativeInterfacePtr](env).DeleteLocalRef(env2, obj)
+proc NewObjectA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = cast[ptr JNINativeInterfacePtr](env).NewObjectA(env2, clazz, methodID, args)
+proc CallStaticVoidMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue) {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticVoidMethodA(env2, clazz, methodID, args)
+proc CallVoidMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject, methodID: jmethodID, args: ptr jvalue) {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallVoidMethodA(env2, obj, methodID, args)
+proc CallStaticObjectMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticObjectMethodA(env2, clazz, methodID, args)
+proc CallObjectMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject, methodID: jmethodID, args: ptr jvalue): jobject {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallObjectMethodA(env2, obj, methodID, args)
+proc CallStaticIntMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jint {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticIntMethodA(env2, clazz, methodID, args)
+proc CallIntMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jint {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallIntMethodA(env2, clazz, methodID, args)
+proc CallStaticBooleanMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jboolean {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticBooleanMethodA(env2, clazz, methodID, args)
+proc CallBooleanMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jboolean {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallBooleanMethodA(env2, clazz, methodID, args)
+proc CallStaticByteMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jbyte {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticByteMethodA(env2, clazz, methodID, args)
+proc CallByteMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jbyte {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallByteMethodA(env2, clazz, methodID, args)
+proc CallStaticShortMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jshort {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticShortMethodA(env2, clazz, methodID, args)
+proc CallShortMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jshort {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallShortMethodA(env2, clazz, methodID, args)
+proc CallStaticLongMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jlong {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticLongMethodA(env2, clazz, methodID, args)
+proc CallLongMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jlong {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallLongMethodA(env2, clazz, methodID, args)
+proc CallStaticCharMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jchar {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticCharMethodA(env2, clazz, methodID, args)
+proc CallCharMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jchar {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallCharMethodA(env2, clazz, methodID, args)
+proc CallStaticFloatMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jfloat {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticFloatMethodA(env2, clazz, methodID, args)
+proc CallFloatMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jfloat {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallFloatMethodA(env2, clazz, methodID, args)
+proc CallStaticDoubleMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, methodID: jmethodID, args: ptr jvalue): jdouble {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallStaticDoubleMethodA(env2, clazz, methodID, args)
+proc CallDoubleMethodA(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jobject, methodID: jmethodID, args: ptr jvalue): jdouble {.inline.} = cast[ptr JNINativeInterfacePtr](env).CallDoubleMethodA(env2, clazz, methodID, args)
+template NewObjectArray(env: JNIEnvPtr, env2: JNIEnvPtr, size: jsize, clazz: jclass, init: jobject): jobjectArray = cast[ptr JNINativeInterfacePtr](env).NewObjectArray(env2, size, clazz, init)
+template GetObjectClass(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jobject): jclass = cast[ptr JNINativeInterfacePtr](env).GetObjectClass(env2, obj)
+template GetMethodID*(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, name, sig: cstring): jmethodID = cast[ptr JNINativeInterfacePtr](env).GetMethodID(env2, clazz, name, sig)
+template ExceptionOccurred(env: JNIEnvPtr, env2: JNIEnvPtr): jthrowable = cast[ptr JNINativeInterfacePtr](env).ExceptionOccurred(env2)
+template ExceptionClear(env: JNIEnvPtr, env2: JNIEnvPtr) = cast[ptr JNINativeInterfacePtr](env).ExceptionClear(env2)
+template GetStaticFieldID*(env: JNIEnvPtr, env2: JNIEnvPtr, clazz: jclass, name, sig: cstring): jfieldID = cast[ptr JNINativeInterfacePtr](env).GetStaticFieldID(env2, clazz, name, sig)
+template GetStaticObjectField*(env: JNIEnvPtr, env2: JNIEnvPtr, obj: jclass, fieldId: jfieldID): jobject = cast[ptr JNINativeInterfacePtr](env).GetStaticObjectField(env2, obj, fieldId)
+template PushLocalFrame*(env: JNIEnvPtr, env2: JNIEnvPtr, capacity: jint): jint = cast[ptr JNINativeInterfacePtr](env).PushLocalFrame(env2, capacity)
+template PopLocalFrame*(env: JNIEnvPtr, env2: JNIEnvPtr, ret: jobject): jobject = cast[ptr JNINativeInterfacePtr](env).PopLocalFrame(env2, ret)
+template GetByteArrayElements*(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jbyteArray, isCopy: ptr jboolean): ptr jbyte = cast[ptr JNINativeInterfacePtr](env).GetByteArrayElements(env2, arr, isCopy)
+template ReleaseByteArrayElements*(env: JNIEnvPtr, env2: JNIEnvPtr, arr: jbyteArray, elems: ptr jbyte, mode: jint) = cast[ptr JNINativeInterfacePtr](env).ReleaseByteArrayElements(env2, arr, elems, mode)
 
-proc PopLocalFrameNullReturn*(env: JNIEnvPtr, env2: JNIEnvPtr) {.inline.} =
-    {.emit: "(*(*`env`).functions).PopLocalFrame(`env2`, NULL);".}
+template NewObjectArrayNullInit(env: JNIEnvPtr, env2: JNIEnvPtr, size: jsize, clazz: jclass): jobjectArray = cast[ptr JNINativeInterfacePtr](env).NewObjectArray(env2, size, clazz, nullJobject)
+template PopLocalFrameNullReturn*(env: JNIEnvPtr, env2: JNIEnvPtr) = discard cast[ptr JNINativeInterfacePtr](env).PopLocalFrame(env2, nullJobject)
+
+template GetEnv(vm: JavaVMPtr, env: ptr JNIEnvPtr, version: jint): jint = cast[ptr JNIInvokeInterfacePtr](vm).GetEnv(cast[JavaVMPtr](vm), cast[ptr pointer](env), version)
+template DestroyJavaVM(vm: JavaVMPtr): jint = cast[ptr JNIInvokeInterfacePtr](vm).DestroyJavaVM(cast[JavaVMPtr](vm))
 
 var currentEnv* : JNIEnvPtr
 
 const JNI_INCLUDE_DIR = JAVA_HOME & "/include"
 
-{.passC: "-I" & JNI_INCLUDE_DIR.}
-
 when defined macosx:
+    {.passC: "-I" & JNI_INCLUDE_DIR.}
     {.emit: """
     #include <CoreFoundation/CoreFoundation.h>
     """.}
     {.passC: "-I" & JNI_INCLUDE_DIR & "/darwin".}
     {.passL: "-framework CoreFoundation".}
-
-when defined linux:
+elif defined windows:
+    {.passC: "-I\"" & JNI_INCLUDE_DIR & "\"".}
+    {.passC: "-I\"" & JNI_INCLUDE_DIR & "/win32\"".}
+elif defined linux:
+    {.passC: "-I" & JNI_INCLUDE_DIR.}
     {.passC: "-I" & JNI_INCLUDE_DIR & "/linux".}
 
 type JavaVM* = ref object of RootObj
     env*: JNIEnvPtr
+    vm*: JavaVMPtr
 
 type JavaVMOption* {.header: jniHeader.} = object
     optionString: cstring
     extraInfo: pointer
 
-type JavaError* = object of Exception
+type JavaVMError* = object of Exception
+
+type JavaError* = object of JavaVMError
     className*: string
     fullStackTrace*: string
 
 template `isNil`* (x: jclass): bool = cast[pointer](x) == nil
 template `isNil`* (x: jmethodID): bool = cast[pointer](x) == nil
 template `isNil`* (x: jfieldID): bool = cast[pointer](x) == nil
+template `isNil`* (x: jobject): bool = cast[pointer](x) == nil
 
 type JavaVMInitArgs* {.header: jniHeader.} = object
     version: jint
@@ -377,7 +400,16 @@ when not defined(macosx):
     proc findJVMLib(): string =
         let home = getJavaHome()
         when defined(windows):
-            result = home & "\\jre\\lib\\jvm.dll"
+            result = home & "\\bin\\client\\jvm.dll"
+            if fileExists(result): return
+            result = home & "\\bin\\server\\jvm.dll"
+            if fileExists(result): return
+            result = home & "\\jre\\bin\\client\\jvm.dll"
+            if fileExists(result): return
+            result = home & "\\jre\\bin\\server\\jvm.dll"
+            if fileExists(result): return
+        elif defined(android):
+            result = "/system/lib/libdvm.so"
             if fileExists(result): return
         else:
             result = home & "/jre/lib/libjvm.so"
@@ -409,9 +441,9 @@ proc linkWithJVMLib() =
 
             if (bundle)
             {
-                `JNI_CreateJavaVM` = (jint (*)(void **, void **, void *))CFBundleGetFunctionPointerForName(bundle, CFSTR("JNI_CreateJavaVM"));
+                `JNI_CreateJavaVM` = (jint (*)(JavaVM **, void **, void *))CFBundleGetFunctionPointerForName(bundle, CFSTR("JNI_CreateJavaVM"));
                 `JNI_GetDefaultJavaVMInitArgs` = (jint (*)(JavaVMInitArgs *))CFBundleGetFunctionPointerForName(bundle, CFSTR("JNI_GetDefaultJavaVMInitArgs"));
-                `JNI_GetCreatedJavaVMs` = (jint (*)(void **, jsize, jsize *))CFBundleGetFunctionPointerForName(bundle, CFSTR("JNI_GetCreatedJavaVMs"));
+                `JNI_GetCreatedJavaVMs` = (jint (*)(JavaVM **, jsize, jsize *))CFBundleGetFunctionPointerForName(bundle, CFSTR("JNI_GetCreatedJavaVMs"));
             }
         }
         """.}
@@ -432,14 +464,11 @@ proc linkWithJVMLib() =
     if not isJVMLoaded():
         raise newException(Exception, "JVM could not be loaded")
 
-proc getEnv(vm: JavaVMPtr, env: ptr JNIEnvPtr, version: jint): jint =
-    when not defined(jnimcpp):
-        {.emit: "`result` = (*((JavaVM*)`vm`))->GetEnv(`vm`, `env`, `version`);".}
-    else:
-        {.emit: "`result` = ((JavaVM*)`vm`)->functions->GetEnv((JavaVM*)`vm`, (void**)`env`, `version`);".}
+proc cstringFromJstring*(s: jstring, env: ptr JNINativeInterfacePtr, env2: JNIEnvPtr): cstring {.inline.} =
+    {.emit: "`result` = (char *)(*`env`)->GetStringUTFChars(`env2`, `s`, `nullJBooleanPtr`);".}
 
-proc cstringFromJstring*(s: jstring, env: JNIEnvPtr, env2: JNIEnvPtr): cstring {.inline.} =
-    {.emit: "`result` = (char *)(*(*`env`).functions).GetStringUTFChars(`env`, `s`, NULL);".}
+template cstringFromJstring*(s: jstring, env: JNIEnvPtr, env2: JNIEnvPtr): cstring =
+    s.cstringFromJstring(cast[ptr JNINativeInterfacePtr](env), env2)
 
 template findClass*(env: JNIEnvPtr, name: cstring): jclass = env.FindClass(env, name)
 template getObjectClass*(env: JNIEnvPtr, obj: jobject): jclass = env.GetObjectClass(env, obj)
@@ -452,8 +481,7 @@ proc getClassInCurrentEnv*(fullyQualifiedName: cstring): jclass =
 
 proc getString*(env: JNIEnvPtr, s: jstring): string =
     if s != nil:
-        let cstr = s.cstringFromJstring(env, env)
-
+        var cstr = s.cstringFromJstring(env, env)
         result = $cstr
         env.ReleaseStringUTFChars(env, s, cstr)
 
@@ -477,6 +505,8 @@ template newObjectArray*(env: JNIEnvPtr, size: jsize, clazz: jclass, init: jobje
     env.NewObjectArray(env, size, clazz, init)
 template newObjectArrayNullInit*(env: JNIEnvPtr, size: jsize, clazz: jclass): jobjectArray =
     env.NewObjectArrayNullInit(env, size, clazz)
+template getArrayLength*(env: JNIEnvPtr, arr: jarray): jsize =
+    env.GetArrayLength(env, arr)
 
 template getObjectArrayElement*(env: JNIEnvPtr, arr: jobjectArray, index: jsize): jobject =
     env.GetObjectArrayElement(env, arr, index)
@@ -601,13 +631,33 @@ proc toJValue*(a: openarray[jobject], res: var jvalue) =
     for i, v in a:
         currentEnv.setObjectArrayElement(cast[jobjectArray](res.l), i.jsize, v)
 
-type JPrimitiveType = jint | jfloat | jboolean | jdouble | jshort | jlong | jchar
+type JPrimitiveType = jint | jfloat | jboolean | jdouble | jshort | jlong | jchar | jbyte
 
 proc toJValue*[T: JPrimitiveType](a: openarray[T], res: var jvalue) {.inline.} =
     res.l = currentEnv.newArrayOfType(a.len.jsize, T)
     var pt {.noinit.} : ptr T
     {.emit: "`pt` = `a`;".}
     currentEnv.setArrayRegion(res.l, 0, a.len.jsize, pt)
+
+template jarrayToSeqImpl[T](env: JNIEnvPtr, arr: jarray, res: var seq[T]) =
+  res = nil
+  if arr == nil:
+    return
+  let length = env.getArrayLength(arr)
+  res = newSeq[T](length.int)
+  when T is JPrimitiveType:
+    env.getArrayRegion(arr, 0, length, addr(res[0]))
+  elif compiles(res[0].jobject): # imported types are distinct objects
+    for i in 0..<res.len:
+      res[i] = env.getObjectArrayElement(arr.jobjectArray, i.jsize).T
+  elif T is string:
+    for i in 0..<res.len:
+      res[i] = env.getString(env.getObjectArrayElement(arr.jobjectArray, i.jsize).jstring)
+  else:
+    {.fatal: "Sequences is not supported for the supplied type".}
+
+proc jarrayToSeq[T](env: JNIEnvPtr, arr: jarray, t: typedesc[seq[T]]): seq[T] {.inline.} =
+  env.jarrayToSeqImpl(arr, result)
 
 proc newJavaVM*(options: openarray[string] = []): JavaVM =
     linkWithJVMLib()
@@ -624,13 +674,23 @@ proc newJavaVM*(options: openarray[string] = []): JavaVM =
     if options.len > 0:
         args.options = addr opts[0]
 
-    var vm : JavaVMPtr
-
-    let res = JNI_CreateJavaVM(addr vm, cast[ptr pointer](addr result.env), addr args)
+    let res = JNI_CreateJavaVM(addr result.vm, cast[ptr pointer](addr result.env), addr args)
     if res < 0:
         result = nil
     else:
         currentEnv = result.env
+
+proc destroy*(vm: var JavaVM) =
+    let res = vm.vm.DestroyJavaVM
+
+    if res < 0:
+        raise newException(JavaVMError, "Failed to destroy Java VM! (Error code: " & $res & ")")
+    else:
+        if currentEnv == vm.env:
+            currentEnv = nil
+
+        vm.env = nil
+        vm.vm = nil
 
 template methodSignatureForType*(t: typedesc[jlong]): string = "J"
 template methodSignatureForType*(t: typedesc[jint]): string = "I"
@@ -647,7 +707,7 @@ template methodSignatureForType*(t: typedesc[string]): string = "Ljava/lang/Stri
 template methodSignatureForType*(t: typedesc[void]): string = "V"
 template methodSignatureForType*(t: typedesc[jByteArray]): string = "[B"
 
-proc elementTypeOfOpenArrayType[OpenArrayType](dummy: OpenArrayType = []): auto = dummy[0]
+proc elementTypeOfOpenArrayType[OpenArrayType](dummy: OpenArrayType = @[]): auto = dummy[0]
 template methodSignatureForType*(t: typedesc[openarray]): string = "[" & methodSignatureForType(type(elementTypeOfOpenArrayType[t]()))
 
 template getFieldOfType*(env: JNIEnvPtr, T: typedesc, o: expr, fieldId: jfieldID): expr =
@@ -669,6 +729,8 @@ template getFieldOfType*(env: JNIEnvPtr, T: typedesc, o: expr, fieldId: jfieldID
         env.getDoubleField(o, fieldId)
     elif T is string:
         env.getString(cast[jstring](currentEnv.getObjectField(o, fieldId)))
+    elif T is seq:
+        T(jarrayToSeq(env, env.getObjectField(o, fieldId).jarray, T))
     else:
         T(env.getObjectField(o, fieldId))
 
@@ -693,6 +755,8 @@ template callMethodOfType*(env: JNIEnvPtr, T: typedesc, o: expr, methodId: jmeth
         env.getString(cast[jstring](currentEnv.callObjectMethod(o, methodID, args)))
     elif T is void:
         env.callVoidMethod(o, methodID, args)
+    elif T is seq:
+        T(jarrayToSeq(env, env.callObjectMethod(o, methodID, args).jarray, T))
     elif T is jstring or T is jarray or T is jByteArray:
         cast[T](env.callObjectMethod(o, methodID, args))
     else:
@@ -723,7 +787,7 @@ proc findRunningVM() =
     var bufSize : jsize = 0
     discard JNI_GetCreatedJavaVMs(addr vmBuf[0], jsize(vmBuf.len), addr bufSize)
     if bufSize > 0:
-        let res = vmBuf[0].getEnv(addr currentEnv, JNI_VERSION_1_6)
+        let res = vmBuf[0].GetEnv(addr currentEnv, JNI_VERSION_1_6)
         if res != 0:
             raise newException(Exception, "getEnv result: " & $res)
         if currentEnv.isNil:
@@ -827,6 +891,8 @@ proc nodeToString(e: NimNode): string {.compileTime.} =
             result &= nodeToString(s)
     elif e.kind == nnkDotExpr:
         result = nodeToString(e[0]) & "." & nodeToString(e[1])
+    elif e.kind == nnkInfix and $(e[0].toStrLit) == "$":
+        result = nodeToString(e[1]) & "$" & nodeToString(e[2])
     else:
         echo treeRepr(e)
         assert(false, "Cannot stringize node")
@@ -839,7 +905,16 @@ proc consumePropertyPragma(e: NimNode): bool {.compileTime.} =
             p.del(i)
             break
 
-proc generateJNIProc(e: NimNode): NimNode {.compileTime.} =
+proc consumeImportcPragma(e: NimNode): string {.compileTime.} =
+    result = nil
+    let p = e.pragma
+    for i in 0 ..< p.len:
+        if p[i].kind == nnkExprColonExpr and $(p[i][0]) == "importc":
+            result = $(p[i][1])
+            p.del(i)
+            break
+
+proc generateJNIProc(e: NimNode, exported: bool): NimNode {.compileTime.} =
     result = e
     let isGeneric = e[2].kind == nnkGenericParams
     let isStatic = (e.params[1][1].kind == nnkBracketExpr) and (not isGeneric)
@@ -850,9 +925,14 @@ proc generateJNIProc(e: NimNode): NimNode {.compileTime.} =
             className = $(result.params[1][1])
         else:
             className = $(result.params[1][1][1])
-        result.params[0] = newIdentNode(className)
+        result.params[0] = ident(className)
+    if exported:
+        result[0] = if exported: ident(procName).postfix("*") else: ident(procName)
 
     let isProp = consumePropertyPragma(result)
+    var realName = consumeImportcPragma(result)
+    if realName == nil:
+      realName = procName
 
     var numArgs = 0
     for i in 2 .. < result.params.len:
@@ -873,6 +953,7 @@ proc generateJNIProc(e: NimNode): NimNode {.compileTime.} =
             argsSigNode.add(newCall("methodSignatureForType", result.params[i][^2]))
             initParamsNode.add quote do:
                 toJValue(`p`, `paramsSym`[`iParam`])
+            inc iParam
 
     let setterType = newCall("type", if numArgs > 0:
             result.params[2][0]
@@ -880,39 +961,67 @@ proc generateJNIProc(e: NimNode): NimNode {.compileTime.} =
             bindSym "jint"
         )
 
-    let jniImplCall = newCall(bindsym"jniImpl", newLit(procName), newLit(isStatic), newLit(isGeneric), newLit(isProp), result.params[1][0], argsSigNode, paramsSym, setterType)
+    let jniImplCall = newCall(bindsym"jniImpl", newLit(realName), newLit(isStatic), newLit(isGeneric), newLit(isProp), result.params[1][0], argsSigNode, paramsSym, setterType)
 
     result.body = newStmtList(params, initParamsNode, jniImplCall)
 
-template defineJNIType(className: expr, fullyQualifiedName: string): stmt =
-    type `className`* {.inject.} = distinct jobject
-    template fullyQualifiedClassName*(t: typedesc[`className`]): string = fullyQualifiedName.replace(".", "/")
-    template methodSignatureForType*(t: typedesc[`className`]): string = "L" & fullyQualifiedClassName(t) & ";"
-    template toJValue*(v: `className`, res: var jvalue) = res.l = jobject(v)
+macro defineJNIType(className: expr, fullyQualifiedName: string, exported: static[bool]): stmt =
+    result = newStmtList()
+    if not exported:
+        result.add quote do: {.push hints: off.}
+    let fqn = ($fullyQualifiedName).replace(".", "/")
+    let clsName = if exported: className.postfix("*") else: className
+    let fqcn = if exported: ident("fullyQualifiedClassName").postfix("*") else: ident"fullyQualifiedClassName"
+    let msft = if exported: ident("methodSignatureForType").postfix("*") else: ident"methodSignatureForType"
+    let tjv = if exported: ident("toJValue").postfix("*") else: ident"toJValue"
+    result.add quote do:
+        type `clsName` = distinct jobject
+        template `fqcn`(t: typedesc[`className`]): string = `fqn`
+        template `msft`(t: typedesc[`className`]): string = "L" & fullyQualifiedClassName(t) & ";"
+        proc `tjv`(v: `className`, res: var jvalue) {.inline.} = res.l = jobject(v)
+    if not exported:
+       result.add quote do: {.pop.}
 
-proc generateTypeDefinition(className: NimNode, fullyQualifiedName: string): NimNode {.compileTime.} =
-    result = newCall(bindsym"defineJNIType", className, newLit(fullyQualifiedName))
+macro defineJNITypeWithGeneric(className: expr, fullyQualifiedName: string, exported: static[bool]): stmt =
+    result = newStmtList()
+    if not exported:
+        result.add quote do: {.push hints: off.}
+    let fqn = ($fullyQualifiedName).replace(".", "/")
+    let clsName = if exported: className.postfix("*") else: className
+    let fqcn = if exported: ident("fullyQualifiedClassName").postfix("*") else: ident"fullyQualifiedClassName"
+    let msft = if exported: ident("methodSignatureForType").postfix("*") else: ident"methodSignatureForType"
+    let tjv = if exported: ident("toJValue").postfix("*") else: ident"toJValue"
+    result.add quote do:
+        type `clsName`[T] = distinct jobject
+        template `fqcn`[T](t: typedesc[`className`[T]]): string = `fqn`
+        template `msft`[T](t: typedesc[`className`[T]]): string = "L" & fullyQualifiedClassName(t) & ";"
+        proc `tjv`[T](v: `className`[T], res: var jvalue) {.inline.} = res.l = jobject(v)
+    if not exported:
+       result.add quote do: {.pop.}
 
-template defineJNITypeWithGeneric(className: expr, fullyQualifiedName: string): stmt =
-    type `className`* {.inject.} [T] = distinct jobject
-    template fullyQualifiedClassName*[T](t: typedesc[`className`[T]]): string = fullyQualifiedName.replace(".", "/")
-    template methodSignatureForType*(t: typedesc[`className`]): string = "L" & fullyQualifiedClassName(t) & ";"
-    template toJValue*(v: `className`, res: var jvalue) = res.l = jobject(v)
+proc generateTypeDefinition(className: NimNode, fullyQualifiedName: string, exported: bool): NimNode {.compileTime.} =
+    result = newCall(bindsym"defineJNIType", className, newLit(fullyQualifiedName), newLit(exported))
 
-proc generateTypeDefinitionWithGeneric(className: NimNode, fullyQualifiedName: string): NimNode {.compileTime.} =
-    result = newCall(bindsym"defineJNITypeWithGeneric", className, newLit(fullyQualifiedName))
+proc generateTypeDefinitionWithGeneric(className: NimNode, fullyQualifiedName: string, exported: bool): NimNode {.compileTime.} =
+    result = newCall(bindsym"defineJNITypeWithGeneric", className, newLit(fullyQualifiedName), newLit(exported))
 
-proc processJnimportNode(e: NimNode): NimNode {.compileTime.} =
+proc processJnimportNode(e: NimNode, exported: bool): NimNode {.compileTime.} =
     if e.kind == nnkDotExpr:
-        result = generateTypeDefinition(e[1], nodeToString(e))
+        result = generateTypeDefinition(e[1], nodeToString(e), exported)
     elif e.kind == nnkBracketExpr:
-        result = generateTypeDefinitionWithGeneric(e[0][1], nodeToString(e[0]))
+        result = generateTypeDefinitionWithGeneric(e[0][1], nodeToString(e[0]), exported)
+    elif e.kind == nnkInfix:
+        let opname = $(e[0].toStrLit)
+        if  opname == "$":
+            result = generateTypeDefinition(e[2], nodeToString(e), exported)
+        elif opname == "as":
+            result = generateTypeDefinition(e[2], nodeToString(e[1]), exported)
     elif e.kind == nnkIdent:
-        result = generateTypeDefinition(e, $e)
+        result = generateTypeDefinition(e, $e, exported)
     elif e.kind == nnkImportStmt:
-        result = processJnimportNode(e[0])
+        result = processJnimportNode(e[0], exported)
     elif e.kind == nnkProcDef:
-        result = generateJNIProc(e)
+        result = generateJNIProc(e, exported)
     else:
         echo treeRepr(e)
         assert(false, "Invalid use of jnimport")
@@ -921,20 +1030,38 @@ macro jnimport*(e: expr): stmt =
     if e.kind == nnkStmtList:
         result = newStmtList()
         for c in e.children:
-            result.add(processJnimportNode(c))
+            result.add(processJnimportNode(c, false))
     else:
-        result = processJnimportNode(e)
+        result = processJnimportNode(e, false)
+
+macro jnimportEx*(e: expr): stmt =
+    if e.kind == nnkStmtList:
+        result = newStmtList()
+        for c in e.children:
+            result.add(processJnimportNode(c, true))
+    else:
+        result = processJnimportNode(e, true)
 
 jnimport:
     import java.lang.Throwable
-    import java.lang.StackTraceElement
+    import java.io.StringWriter
+    import java.io.PrintWriter
+    import java.io.Writer
 
-    #proc getMessage(t: Throwable): string
     proc toString(t: Throwable): string
+    proc new(t: typedesc[PrintWriter], w: Writer)
+    proc printStackTrace(t: Throwable, w: PrintWriter)
+    proc new(t: typedesc[StringWriter])
+    proc toString(w: StringWriter): string
 
 proc newExceptionWithJavaException(ex: jthrowable): ref JavaError =
     let mess = Throwable(ex).toString()
+    let sw = StringWriter.new
+    let pw = PrintWriter.new(sw.Writer)
+    Throwable(ex).printStackTrace(pw)
+    let stack = sw.toString.strip
     result = newException(JavaError, mess)
+    result.fullStackTrace = stack
 
 proc checkForException() =
     let jex = currentEnv.exceptionOccurred()
