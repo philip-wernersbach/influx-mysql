@@ -1,7 +1,7 @@
 # influxql_to_sql.nim
 # Part of influx-mysql by Philip Wernersbach <philip.wernersbach@gmail.com>
 #
-# Copyright (c) 2016, Philip Wernersbach
+# Copyright (c) 2016-2017, Philip Wernersbach
 #
 # The source code in this file is licensed under the 2-Clause BSD License.
 # See the LICENSE file in this project's root directory for the license
@@ -65,14 +65,29 @@ proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64, nowTime: uint6
     let iqlLen = iql.len
     let literalTypePos = iqlLen - 1
 
-    if iqlLen > 0:
+    if literalTypePos >= 0:
         case iql[literalTypePos]:
         of 'u':
             result = (iql.parseBiggestUInt(millis) == literalTypePos)
             millis = millis div 1000
+        of char(0xb5):
+            # 0xc2b5 is the UTF-8 encoding for Mu, which is a postfix for microseconds (same as 'u').
+            let beforeLiteralTypePos = literalTypePos - 1
+
+            if (beforeLiteralTypePos >= 0) and (iql[beforeLiteralTypePos] == char(0xc2)):
+                result = (iql.parseBiggestUInt(millis) == beforeLiteralTypePos)
+                millis = millis div 1000
+            else:
+                result = false
         of 's':
-            result = (iql.parseBiggestUInt(millis) == literalTypePos)
-            millis *= 1000
+            let beforeLiteralTypePos = literalTypePos - 1
+
+            if (beforeLiteralTypePos >= 0) and (iql[beforeLiteralTypePos] == 'm'):
+                # ms is the postfix for milliseconds.
+                result = (iql.parseBiggestUInt(millis) == beforeLiteralTypePos)
+            else:
+                result = (iql.parseBiggestUInt(millis) == literalTypePos)
+                millis *= 1000
         of 'm':
             result = (iql.parseBiggestUInt(millis) == literalTypePos)
             millis *= 60000
@@ -89,6 +104,8 @@ proc influxQlTimeLiteralToMillis(iql: string, millis: var uint64, nowTime: uint6
             if iql == "now()":
                 millis = nowTime
                 result = true
+            else:
+                result = false
         else:
             result = false
     else:
@@ -328,11 +345,12 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
 
                                 if (jPartLen > 0) and (parts[j][jPartLen - 1] == ')'):
                                     if parts[j].startsWith("time(") and (parts[j - 1] == "BY") and (parts[j - 2] == "GROUP"):
-                                        let intStr = parts[j][5..jPartLen-3]
                                         fill = ResultFillType.NULL
 
                                         case parts[j][jPartLen-2]:
                                         of 'u':
+                                            let intStr = parts[j][5..jPartLen-3]
+
                                             # Qt doesn't have microsecond precision.
                                             period = 0
 
@@ -340,14 +358,37 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                                 parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
                                             else:
                                                 parts[j].intStrToComputedUnixtime(intStr, " * 0.000001 )")
-                                        of 's':
-                                            period = uint64(intStr.parseBiggestInt) * 1000
+                                        of char(0xb5):
+                                            # 0xc2b5 is the UTF-8 encoding for Mu, which is a postfix for microseconds (same as 'u').
+                                            if parts[j][jPartLen-3] == char(0xc2):
+                                                let intStr = parts[j][5..jPartLen-4]
 
-                                            if intStr == "1":
-                                                parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
+                                                # Qt doesn't have microsecond precision.
+                                                period = 0
+
+                                                if intStr == "1":
+                                                    parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time), MICROSECOND(time)"
+                                                else:
+                                                    parts[j].intStrToComputedUnixtime(intStr, " * 0.000001 )")
+                                        of 's':
+                                            if parts[j][jPartLen-3] == 'm':
+                                                # ms is the postfix for milliseconds
+                                                let intStr = parts[j][5..jPartLen-4]
+
+                                                period = uint64(intStr.parseBiggestInt)
+                                                parts[j].intStrToComputedUnixtime(intStr, " * 0.001 )")
                                             else:
-                                                parts[j].intStrToComputedUnixtime(intStr, " )")
+                                                let intStr = parts[j][5..jPartLen-3]
+
+                                                period = uint64(intStr.parseBiggestInt) * 1000
+
+                                                if intStr == "1":
+                                                    parts[j] = "YEAR(time), MONTH(time), DAY(time), HOUR(time), MINUTE(time), SECOND(time)"
+                                                else:
+                                                    parts[j].intStrToComputedUnixtime(intStr, " )")
                                         of 'm':
+                                            let intStr = parts[j][5..jPartLen-3]
+
                                             period = uint64(intStr.parseBiggestInt) * 60000
 
                                             if intStr == "1":
@@ -355,6 +396,8 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                             else:
                                                 parts[j].intStrToComputedUnixtime(intStr, " * 60 )")
                                         of 'h':
+                                            let intStr = parts[j][5..jPartLen-3]
+
                                             period = uint64(intStr.parseBiggestInt) * 3600000
 
                                             if intStr == "1":
@@ -362,6 +405,8 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                             else:
                                                 parts[j].intStrToComputedUnixtime(intStr, " * 3600 )")
                                         of 'd':
+                                            let intStr = parts[j][5..jPartLen-3]
+
                                             period = uint64(intStr.parseBiggestInt) * 86400000
 
                                             if intStr == "1":
@@ -369,6 +414,8 @@ proc influxQlToSql*(influxQl: string, resultTransform: var SQLResultTransform, s
                                             else:
                                                 parts[j].intStrToComputedUnixtime(intStr, " * 86400 )")
                                         of 'w':
+                                            let intStr = parts[j][5..jPartLen-3]
+
                                             period = uint64(intStr.parseBiggestInt) * 604800000
 
                                             if intStr == "1":
