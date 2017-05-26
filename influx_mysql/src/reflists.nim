@@ -29,6 +29,7 @@
 # the reference counting GC's are recursive, and so they overflow the stack when a list is really
 # large. reflists degrade to regular linked lists when the selected GC is not a reference counting
 # GC because the mark-and-sweep GC's do not overflow the stack for large lists.
+
 when not defined(disablereflists) and (compileOption("gc", "refc") or compileOption("gc", "v2")):
     type 
         SinglyLinkedRefListNodeObj[T] = tuple
@@ -52,7 +53,8 @@ when not defined(disablereflists) and (compileOption("gc", "refc") or compileOpt
             raise newException(Exception, "Cannot allocate memory!")
 
         GC_ref(value)
-        result[] = (next: nil, value: cast[pointer](value))
+        result.next = nil
+        result.value = cast[pointer](value)
 
     proc finalizeSinglyLinkedRefList*[T](list: SinglyLinkedRefList[T] not nil) =
         var current = list.head
@@ -73,12 +75,11 @@ when not defined(disablereflists) and (compileOption("gc", "refc") or compileOpt
 
     proc newSinglyLinkedRefList*[T](): SinglyLinkedRefList[T] not nil =
         new(result, finalizeSinglyLinkedRefList)
-        result[] = (head: nil, tail: nil)
 
     proc prepend*[T](list: SinglyLinkedRefList[T] not nil, value: ref T) =
         var node = newSinglyLinkedRefListNode[T](value)
         
-        node.next = list.head   
+        node.next = list.head
         list.head = node
 
         if list.tail == nil:
