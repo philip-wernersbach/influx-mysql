@@ -7,7 +7,6 @@
 # See the LICENSE file in this project's root directory for the license
 # text.
 
-import macros
 import tables
 
 import qt5_qtsql
@@ -22,51 +21,24 @@ type
 var dbHostname*: cstring = nil
 var dbPort*: cint = 0
 
-macro useDB*(dbName: string, dbUsername: string, dbPassword: string, body: stmt): stmt {.immediate.} =
-    # Create the try block that closes the database.
-    var safeBodyClose = newNimNode(nnkTryStmt)
-    safeBodyClose.add(body)
+template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
+    var qSqlDatabaseStackId: uint8
+    var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
 
-    ## Create the finally clause
-    var safeBodyCloseFinally = newNimNode(nnkFinally)
-    safeBodyCloseFinally.add(parseStmt("database.close"))
-    
-    ## Add the finally clause to the try block.
-    safeBodyClose.add(safeBodyCloseFinally)
+    try:
+        var database = newQSqlDatabase("QMYSQL", qSqlDatabaseName)
 
-    # Create the try block that removes the database.
-    var safeBodyRemove = newNimNode(nnkTryStmt)
-    safeBodyRemove.add(
-        newBlockStmt(
-            newStmtList(
-                newVarStmt(newIdentNode(!"database"), newCall(!"newQSqlDatabase", newStrLitNode("QMYSQL"), newIdentNode(!"qSqlDatabaseName"))),
-                newCall(!"setHostName", newIdentNode(!"database"), newIdentNode(!"dbHostName")),
-                newCall(!"setDatabaseName", newIdentNode(!"database"), dbName),
-                newCall(!"setPort", newIdentNode(!"database"), newIdentNode(!"dbPort")),
-                newCall(!"open", newIdentNode(!"database"), dbUsername, dbPassword),
-                safeBodyClose
-            )
-        )
-    )
+        database.setHostName(dbHostName)
+        database.setDatabaseName(dbName)
+        database.setPort(dbPort)
+        database.open(dbUsername, dbPassword)
 
-    ## Create the finally clause.
-    var safeBodyRemoveFinally = newNimNode(nnkFinally)
-    safeBodyRemoveFinally.add(parseStmt("qSqlDatabaseRemoveDatabase(qSqlDatabaseName)"))
-
-    ## Add the finally clause to the try block.
-    safeBodyRemove.add(safeBodyRemoveFinally)
-
-    # Put it all together.
-    result = newBlockStmt(
-                newStmtList(
-                    parseStmt("""
-
-var qSqlDatabaseStackId: uint8
-var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
-                    """), 
-                    safeBodyRemove
-                )
-            )
+        try:
+            body
+        finally:
+            database.close
+    finally:
+        qSqlDatabaseRemoveDatabase(qSqlDatabaseName)
 
 template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
     try:
