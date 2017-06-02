@@ -61,4 +61,7 @@ template cmdlineMain*(postamble: untyped): typed {.dirty.} =
         dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
         copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
 
+        when compileOption("threads"):
+            qSqlDatabaseAddRemoveLock.initLock
+
         postamble

@@ -10,6 +10,7 @@
 {.boundChecks: on.}
 
 import os
+import locks
 import strutils
 import tables
 
@@ -99,6 +100,8 @@ iterator waitEachWhileContinueRunning(queue: SynchronousQueue[CompressedBatchPoi
             currentEnv.PopLocalFrameNullReturn
 
 proc runDBQueryWithTransaction(id: int) {.thread.} =
+    qSqlDatabaseThreadConnectionName = "influx_mysql" & $id
+
     try:
         while threadInputs[id].recv:
             let context = threadInputsData[id]

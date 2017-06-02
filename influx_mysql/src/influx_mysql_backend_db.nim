@@ -7,6 +7,9 @@
 # See the LICENSE file in this project's root directory for the license
 # text.
 
+when compileOption("threads"):
+    import locks
+
 import tables
 
 import qt5_qtsql
@@ -21,21 +24,68 @@ type
 var dbHostname*: cstring = nil
 var dbPort*: cint = 0
 
-template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
-    try:
-        var database = newQSqlDatabase("QMYSQL", "influx_mysql")
+when compileOption("threads"):
+    var qSqlDatabaseThreadConnectionName* {.threadvar.}: string
+    var qSqlDatabaseAddRemoveLock*: Lock
 
-        database.setHostName(dbHostName)
-        database.setDatabaseName(dbName)
-        database.setPort(dbPort)
-        database.open(dbUsername, dbPassword)
+template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
+    when not compileOption("threads"):
+        try:
+            var database = newQSqlDatabase("QMYSQL", "influx_mysql")
+
+            database.setHostName(dbHostName)
+            database.setDatabaseName(dbName)
+            database.setPort(dbPort)
+            database.open(dbUsername, dbPassword)
+
+            try:
+                body
+            finally:
+                database.close
+        finally:
+            qSqlDatabaseRemoveDatabase("influx_mysql")
+    else:
+        # The QT documentation guarantees that adding and removing database connections
+        # is thread-safe. However, the QMYSQL driver uses reference counting to count
+        # how many connections are active. This reference counting is not thread safe, so
+        # therefore we must ensure that only one thread at a time creates and removes
+        # database connections.
+
+        # This variable is required because if an exception occurs in a critical section,
+        # we need to know if releasing the lock in the exception handler is required.
+        #
+        # We can't do this with a try-finally block because a try-finally block creates a
+        # new scope, and the database connection must stay in scope while it is used.
+        var lockAcquired = false
 
         try:
-            body
+            qSqlDatabaseAddRemoveLock.acquire
+            lockAcquired = true
+
+            var database = newQSqlDatabase("QMYSQL", qSqlDatabaseThreadConnectionName)
+            
+            qSqlDatabaseAddRemoveLock.release
+            lockAcquired = false
+
+            database.setHostName(dbHostName)
+            database.setDatabaseName(dbName)
+            database.setPort(dbPort)
+            database.open(dbUsername, dbPassword)
+
+            try:
+                body
+            finally:
+                database.close
         finally:
-            database.close
-    finally:
-        qSqlDatabaseRemoveDatabase("influx_mysql")
+            try:
+                if not lockAcquired:
+                    qSqlDatabaseAddRemoveLock.acquire
+                    lockAcquired = true
+
+                qSqlDatabaseRemoveDatabase(qSqlDatabaseThreadConnectionName)
+            finally:
+                if lockAcquired:
+                    qSqlDatabaseAddRemoveLock.release
 
 template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
     try:
