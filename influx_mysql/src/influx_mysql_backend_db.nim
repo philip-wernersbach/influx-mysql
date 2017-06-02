@@ -18,24 +18,22 @@ import influx_mysql_backend
 type
     DBQueryException* = object of IOError
 
-var dbHostname*: cstring = nil
-var dbPort*: cint = 0
+proc initBackendDB*(dbHostname: string, dbPort: int) =
+    var database = newQSqlDatabase("QMYSQL", "influx_mysql")
+
+    database.setHostName(dbHostName)
+    database.setPort(cint(dbPort))
 
 template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
+    var database = getQSqlDatabase("influx_mysql", false)
+
+    database.setDatabaseName(dbName)
+    database.open(dbUsername, dbPassword)
+
     try:
-        var database = newQSqlDatabase("QMYSQL", "influx_mysql")
-
-        database.setHostName(dbHostName)
-        database.setDatabaseName(dbName)
-        database.setPort(dbPort)
-        database.open(dbUsername, dbPassword)
-
-        try:
-            body
-        finally:
-            database.close
+        body
     finally:
-        qSqlDatabaseRemoveDatabase("influx_mysql")
+        database.close
 
 template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
     try:
