@@ -10,7 +10,7 @@
 template cmdlineMain*(postamble: untyped): typed {.dirty.} =
     block: 
         var dbHostnameString = "localhost"
-        dbPort = 3306
+        var dbPort = 3306
 
         var httpServerHostname = ""
         var httpServerPort = 8086
@@ -33,7 +33,7 @@ template cmdlineMain*(postamble: untyped): typed {.dirty.} =
             dbHostnameString = dbConnectionInfo[0]
 
             try:
-                dbPort = cint(dbConnectionInfo[1].parseInt)
+                dbPort = dbConnectionInfo[1].parseInt
             except ValueError:
                 stderr.writeLine("Error: Invalid mysql port specified!")
                 quitUsage()
@@ -58,10 +58,6 @@ template cmdlineMain*(postamble: untyped): typed {.dirty.} =
             stderr.writeLine("Error: Invalid influxdb address, influxdb port combination specified!")
             quitUsage()
 
-        dbHostname = cast[cstring](allocShared0(dbHostnameString.len + 1))
-        copyMem(addr(dbHostname[0]), addr(dbHostnameString[0]), dbHostnameString.len)
-
-        when compileOption("threads"):
-            qSqlDatabaseAddRemoveLock.initLock
+        initBackendDB(dbHostnameString, dbPort)
 
         postamble

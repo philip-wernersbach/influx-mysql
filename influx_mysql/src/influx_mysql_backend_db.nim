@@ -21,30 +21,28 @@ import influx_mysql_backend
 type
     DBQueryException* = object of IOError
 
-var dbHostname*: cstring = nil
-var dbPort*: cint = 0
+when not compileOption("threads"):
+    proc initBackendDB*(dbHostname: string, dbPort: int) =
+        var database = newQSqlDatabase("QMYSQL", "influx_mysql")
 
-when compileOption("threads"):
-    var qSqlDatabaseThreadConnectionName* {.threadvar.}: string
-    var qSqlDatabaseAddRemoveLock*: Lock
+        database.setHostName(dbHostName)
+        database.setPort(cint(dbPort))
+else:
+    var dbHostname: cstring = nil
+    var dbPort: cint = 0
 
-template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
-    when not compileOption("threads"):
-        try:
-            var database = newQSqlDatabase("QMYSQL", "influx_mysql")
+    var qSqlDatabaseThreadConnectionName {.threadvar.}: string
+    var qSqlDatabaseAddRemoveLock: Lock
 
-            database.setHostName(dbHostName)
-            database.setDatabaseName(dbName)
-            database.setPort(dbPort)
-            database.open(dbUsername, dbPassword)
+    proc initBackendDB*(hostname: var string, port: int) =
+        qSqlDatabaseAddRemoveLock.initLock
 
-            try:
-                body
-            finally:
-                database.close
-        finally:
-            qSqlDatabaseRemoveDatabase("influx_mysql")
-    else:
+        dbHostname = cast[cstring](allocShared0(hostname.len + 1))
+        copyMem(addr(dbHostname[0]), addr(hostname[0]), hostname.len)
+
+        dbPort = cint(port)
+
+    proc initBackendDBForThread*(threadConnectionName: string) =
         # The QT documentation guarantees that adding and removing database connections
         # is thread-safe. However, the QMYSQL driver uses reference counting to count
         # how many connections are active. This reference counting is not thread safe, so
@@ -62,30 +60,33 @@ template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body:
             qSqlDatabaseAddRemoveLock.acquire
             lockAcquired = true
 
-            var database = newQSqlDatabase("QMYSQL", qSqlDatabaseThreadConnectionName)
+            var database = newQSqlDatabase("QMYSQL", threadConnectionName)
             
             qSqlDatabaseAddRemoveLock.release
             lockAcquired = false
 
             database.setHostName(dbHostName)
-            database.setDatabaseName(dbName)
             database.setPort(dbPort)
-            database.open(dbUsername, dbPassword)
 
-            try:
-                body
-            finally:
-                database.close
-        finally:
-            try:
-                if not lockAcquired:
-                    qSqlDatabaseAddRemoveLock.acquire
-                    lockAcquired = true
+            qSqlDatabaseThreadConnectionName = threadConnectionName
+        except Exception:
+            if lockAcquired:
+                qSqlDatabaseAddRemoveLock.release
 
-                qSqlDatabaseRemoveDatabase(qSqlDatabaseThreadConnectionName)
-            finally:
-                if lockAcquired:
-                    qSqlDatabaseAddRemoveLock.release
+template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
+
+    var database = when not compileOption("threads"):
+            getQSqlDatabase("influx_mysql", false)
+        else:
+            getQSqlDatabase(qSqlDatabaseThreadConnectionName, false)
+
+    database.setDatabaseName(dbName)
+    database.open(dbUsername, dbPassword)
+
+    try:
+        body
+    finally:
+        database.close
 
 template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
     try:

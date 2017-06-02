@@ -100,7 +100,7 @@ iterator waitEachWhileContinueRunning(queue: SynchronousQueue[CompressedBatchPoi
             currentEnv.PopLocalFrameNullReturn
 
 proc runDBQueryWithTransaction(id: int) {.thread.} =
-    qSqlDatabaseThreadConnectionName = "influx_mysql" & $id
+    initBackendDBForThread("influx_mysql" & $id)
 
     try:
         while threadInputs[id].recv:
