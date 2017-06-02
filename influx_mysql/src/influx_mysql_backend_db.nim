@@ -22,11 +22,8 @@ var dbHostname*: cstring = nil
 var dbPort*: cint = 0
 
 template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body: untyped) {.dirty.} =
-    var qSqlDatabaseStackId: uint8
-    var qSqlDatabaseName = "influx_mysql" & $cast[uint64](addr(qSqlDatabaseStackId))
-
     try:
-        var database = newQSqlDatabase("QMYSQL", qSqlDatabaseName)
+        var database = newQSqlDatabase("QMYSQL", "influx_mysql")
 
         database.setHostName(dbHostName)
         database.setDatabaseName(dbName)
@@ -38,7 +35,7 @@ template useDB*(dbName: untyped, dbUsername: untyped, dbPassword: untyped, body:
         finally:
             database.close
     finally:
-        qSqlDatabaseRemoveDatabase(qSqlDatabaseName)
+        qSqlDatabaseRemoveDatabase("influx_mysql")
 
 template useQuery*(sql: cstring, query: var QSqlQueryObj) {.dirty.} =
     try:
