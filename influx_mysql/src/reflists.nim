@@ -53,7 +53,6 @@ when not defined(disablereflists) and (compileOption("gc", "refc") or compileOpt
             raise newException(Exception, "Cannot allocate memory!")
 
         GC_ref(value)
-        result.next = nil
         result.value = cast[pointer](value)
 
     proc finalizeSinglyLinkedRefList*[T](list: SinglyLinkedRefList[T] not nil) =
