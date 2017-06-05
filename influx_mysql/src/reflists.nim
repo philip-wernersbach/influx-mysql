@@ -32,7 +32,9 @@
 
 when not defined(disablereflists) and (compileOption("gc", "refc") or compileOption("gc", "v2")):
     type 
-        SinglyLinkedRefListNodeObj[T] = tuple
+        # There is no need for this to be an object, but it has to be an object
+        # to work around a Nim compiler bug. nim-lang/Nim#5891
+        SinglyLinkedRefListNodeObj[T] = object
             next: ptr SinglyLinkedRefListNodeObj[T]
             value: pointer
 

@@ -103,7 +103,9 @@ type
         Microsecond
         Nanosecond
 
-    ReadLinesFutureContext* = ref tuple
+    # There is no need for this to be an object, but it has to be an object
+    # to work around a Nim compiler bug. nim-lang/Nim#5891
+    ReadLinesFutureContext* = ref object
         super: ReadLinesContext
         contentLength: int
         read: int
@@ -764,9 +766,7 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     let params = getParams(request)
 
-    var context: ReadLinesFutureContext not nil
-    new(context, destroyReadLinesFutureContext)
-    context[] = (super: newReadLinesContext(compressed,
+    var context = ReadLinesFutureContext(super: newReadLinesContext(compressed,
             if "replace" != params.getOrDefault("sql_insert_type"): SQLInsertType.INSERT else: SQLInsertType.REPLACE,
             ("true" == params.getOrDefault("schemaful")), nil),
         contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params, retFuture: result, routerResult: routerResult)
