@@ -951,8 +951,9 @@ proc generateJNIProc(e: NimNode, exported: bool): NimNode {.compileTime.} =
         for j in 0 .. < result.params[i].len - 2:
             let p = result.params[i][j]
             argsSigNode.add(newCall("methodSignatureForType", result.params[i][^2]))
-            initParamsNode.add quote do:
+            initParamsNode.add(quote do:
                 toJValue(`p`, `paramsSym`[`iParam`])
+            )
             inc iParam
 
     let setterType = newCall("type", if numArgs > 0:
@@ -968,36 +969,37 @@ proc generateJNIProc(e: NimNode, exported: bool): NimNode {.compileTime.} =
 macro defineJNIType(className: expr, fullyQualifiedName: string, exported: static[bool]): stmt =
     result = newStmtList()
     if not exported:
-        result.add quote do: {.push hints: off.}
+        result.add(quote do: {.push hints: off.})
     let fqn = ($fullyQualifiedName).replace(".", "/")
     let clsName = if exported: className.postfix("*") else: className
     let fqcn = if exported: ident("fullyQualifiedClassName").postfix("*") else: ident"fullyQualifiedClassName"
     let msft = if exported: ident("methodSignatureForType").postfix("*") else: ident"methodSignatureForType"
     let tjv = if exported: ident("toJValue").postfix("*") else: ident"toJValue"
-    result.add quote do:
+    result.add(quote do:
         type `clsName` = distinct jobject
         template `fqcn`(t: typedesc[`className`]): string = `fqn`
         template `msft`(t: typedesc[`className`]): string = "L" & fullyQualifiedClassName(t) & ";"
         proc `tjv`(v: `className`, res: var jvalue) {.inline.} = res.l = jobject(v)
+    )
     if not exported:
-       result.add quote do: {.pop.}
+       result.add(quote do: {.pop.})
 
 macro defineJNITypeWithGeneric(className: expr, fullyQualifiedName: string, exported: static[bool]): stmt =
     result = newStmtList()
     if not exported:
-        result.add quote do: {.push hints: off.}
+        result.add(quote do: {.push hints: off.})
     let fqn = ($fullyQualifiedName).replace(".", "/")
     let clsName = if exported: className.postfix("*") else: className
     let fqcn = if exported: ident("fullyQualifiedClassName").postfix("*") else: ident"fullyQualifiedClassName"
     let msft = if exported: ident("methodSignatureForType").postfix("*") else: ident"methodSignatureForType"
     let tjv = if exported: ident("toJValue").postfix("*") else: ident"toJValue"
-    result.add quote do:
+    result.add(quote do:
         type `clsName`[T] = distinct jobject
         template `fqcn`[T](t: typedesc[`className`[T]]): string = `fqn`
         template `msft`[T](t: typedesc[`className`[T]]): string = "L" & fullyQualifiedClassName(t) & ";"
-        proc `tjv`[T](v: `className`[T], res: var jvalue) {.inline.} = res.l = jobject(v)
+        proc `tjv`[T](v: `className`[T], res: var jvalue) {.inline.} = res.l = jobject(v))
     if not exported:
-       result.add quote do: {.pop.}
+       result.add(quote do: {.pop.})
 
 proc generateTypeDefinition(className: NimNode, fullyQualifiedName: string, exported: bool): NimNode {.compileTime.} =
     result = newCall(bindsym"defineJNIType", className, newLit(fullyQualifiedName), newLit(exported))
