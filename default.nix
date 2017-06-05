@@ -36,7 +36,7 @@ licenses of the respective packages.
 	pkgs ? import <nixpkgs> {}, stdenv ? pkgs.stdenv,
 	qt5 ? pkgs.qt5, qtbase ? qt5.qtbase, snappy ? pkgs.snappy,
 	cacert ? pkgs.cacert, git ? pkgs.git,
-	nim ? import ./nim_stdlib_rawrecv { inherit pkgs; }, nimble ? pkgs.nimble.override { inherit nim; },
+	nim ? import ./nim_stdlib_rawrecv { inherit pkgs; },
 	nimGc ? "refc", nimAdditionalOptions ? ""
 }:
 
@@ -58,7 +58,7 @@ let
 
 			src = ./influx_mysql.nimble;
 
-			buildInputs = [ cacert git nimble nim ];
+			buildInputs = [ cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -68,7 +68,7 @@ let
 				rm -Rf .git
 				mkdir -p .nimble
 
-				HOME=$( pwd ) ${nimble}/bin/nimble -y -d install
+				HOME=$( pwd ) ${nim}/bin/nimble -y install -d
 			'';
 
 			installPhase = ''
@@ -86,7 +86,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps qtbase cacert git nimble nim ];
+			buildInputs = [ influx-mysql-deps qtbase cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -97,12 +97,12 @@ in
 
 				mkdir -p bin/
 
-				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nimble}/bin/nimble -y cpp \
+				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
 					--cincludes:${qtbase}/include --cincludes:${snappy}/include \
 					--passL:"-L${qtbase}/lib" --passL:"-L${snappy}/lib" \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_mysql \
-					influx_mysql/src/influx_mysql
+					influx_mysql/src/influx_mysql.nim
 			'';
 
 			installPhase = ''
@@ -119,7 +119,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps qtbase cacert git nimble nim ];
+			buildInputs = [ influx-mysql-deps qtbase cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -130,12 +130,12 @@ in
 
 				mkdir -p bin/
 
-				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nimble}/bin/nimble -y cpp \
+				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
 					--cincludes:${qtbase}/include --cincludes:${snappy}/include \
 					--passL:"-L${qtbase}/lib" --passL:"-L${snappy}/lib" \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influxql_to_sql_cli \
-					influx_mysql/src/influxql_to_sql_cli
+					influx_mysql/src/influxql_to_sql_cli.nim
 			'';
 
 			installPhase = ''
@@ -152,7 +152,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps cacert git nimble nim ];
+			buildInputs = [ influx-mysql-deps cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -163,12 +163,12 @@ in
 
 				mkdir -p bin/
 
-				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nimble}/bin/nimble -y c \
+				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y c \
 					--cincludes:${snappy}/include \
 					--passL:"-L${snappy}/lib" \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_line_protocol_to_sql_cli \
-					influx_mysql/src/influx_line_protocol_to_sql_cli
+					influx_mysql/src/influx_line_protocol_to_sql_cli.nim
 			'';
 
 			installPhase = ''
