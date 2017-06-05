@@ -52,9 +52,6 @@ type
     SNAPPY_INVALID_INPUT = 1
     SNAPPY_BUFFER_TOO_SMALL = 2
 
-  csize* = int
-
-
 proc snappy_compress*(input: cstring;
                       input_length: csize;
                       compressed:  cstring;
@@ -120,11 +117,11 @@ type
 proc compress*(input:string):string =
   ## Compress a string using snappy.
   var
-    output_length = snappy_max_compressed_length(input.len) 
+    output_length = snappy_max_compressed_length(csize(input.len)) 
     output = newString(output_length)
   
   let status = snappy_compress(input,
-                               input.len,
+                               csize(input.len),
                                output,
                                addr (output_length))
   
@@ -138,15 +135,17 @@ proc compress*(input:string):string =
   result = output
 
 proc validateAndGetUncompressedLength*(input: cstring, inputLen: int): int =
-  let can_uncompress = snappy_validate_compressed_buffer(input, inputLen)
+  var resultCsize = csize(0)
+
+  let can_uncompress = snappy_validate_compressed_buffer(input, csize(inputLen))
   if can_uncompress != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,
                        "Malformed compressed input: " & $can_uncompress)
   
-  result = 0
   var status = snappy_uncompressed_length(input,
-                                        inputLen,
-                                        addr result)
+                                        csize(inputLen),
+                                        addr resultCsize)
+  result = int(resultCsize)
 
   if status != snappy_status.SNAPPY_OK:
     raise newException(SnappyException,$status)
@@ -156,11 +155,14 @@ proc uncompressValidatedInputInto*(input: cstring, result: var string, inputLen:
   ## a string compressed by `snappy`.
   ## This does not do validation. Use `validateAndGetUncompressedLength`
   ## to validate the input beforehand.
+  var output_length_csize = csize(output_length)
+
   result.setLen(outputOffset + output_length)
   var status = snappy_uncompress(input,
-                             inputLen,
+                             csize(inputLen),
                              addr(result[outputOffset]),
-                             addr output_length)
+                             addr output_length_csize)
+  output_length = int(output_length_csize)
 
   result.setLen(outputOffset + outputLength)
 
