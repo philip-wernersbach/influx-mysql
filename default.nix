@@ -33,7 +33,8 @@ licenses of the respective packages.
 */
 
 {
-	pkgs ? import <nixpkgs> {}, stdenv ? pkgs.stdenv,
+	pkgs ? import <nixpkgs> {}, stdenv ? pkgs.stdenv, lib ? pkgs.lib,
+	makeWrapper ? pkgs.makeWrapper,
 	qt5 ? pkgs.qt5, qtbase ? qt5.qtbase, snappy ? pkgs.snappy,
 	cacert ? pkgs.cacert, git ? pkgs.git,
 	nim ? import ./nim_stdlib_rawrecv { inherit pkgs; },
@@ -77,6 +78,11 @@ let
 			'';
 		}
 	;
+
+	nimSnappyOptions = '' --cincludes:"${snappy.dev}/include" --passL:"-L${snappy.out}/lib" '';
+	nimQtOptions = '' --passC:-std=c++11 --cincludes:"${qtbase.dev}/include" --cincludes:"${qtbase.out}/lib" --passL:"-L${qtbase.out}/lib" ''
+		+ lib.optionalString stdenv.isDarwin '' --passC:-F${qtbase.dev}/include --passC:-F${qtbase.out}/lib \
+				--passL:-F${qtbase.dev}/include --passL:-F${qtbase.out}/lib '';
 in
 {
 	influx-mysql =
@@ -86,7 +92,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps qtbase cacert git nim ];
+			buildInputs = [ makeWrapper influx-mysql-deps qtbase.out qtbase.dev snappy.out snappy.dev cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -95,11 +101,15 @@ in
 
 				rm -Rf .git
 
-				mkdir -p bin/
+				mkdir -p bin/ build_support/
 
-				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
-					--cincludes:${qtbase}/include --cincludes:${snappy}/include \
-					--passL:"-L${qtbase}/lib" --passL:"-L${snappy}/lib" \
+				# These wrappers are a workaround for a bug in the Nim compiler.
+				# When "-std=c++11" is specified, for some reason Nim calls the C compiler instead of the C++ one.
+				makeWrapper clang++ build_support/clang
+				makeWrapper g++ build_support/gcc
+
+				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
+					${nimSnappyOptions} ${nimQtOptions} \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_mysql \
 					influx_mysql/src/influx_mysql.nim
@@ -119,7 +129,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps qtbase cacert git nim ];
+			buildInputs = [ makeWrapper influx-mysql-deps qtbase.out qtbase.dev snappy.out snappy.dev cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -128,11 +138,15 @@ in
 
 				rm -Rf .git
 
-				mkdir -p bin/
+				mkdir -p bin/ build_support/
 
-				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
-					--cincludes:${qtbase}/include --cincludes:${snappy}/include \
-					--passL:"-L${qtbase}/lib" --passL:"-L${snappy}/lib" \
+				# These wrappers are a workaround for a bug in the Nim compiler.
+				# When "-std=c++11" is specified, for some reason Nim calls the C compiler instead of the C++ one.
+				makeWrapper clang++ build_support/clang
+				makeWrapper g++ build_support/gcc
+
+				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
+					${nimSnappyOptions} ${nimQtOptions} \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influxql_to_sql_cli \
 					influx_mysql/src/influxql_to_sql_cli.nim
@@ -152,7 +166,7 @@ in
 
 			src = [ ./influx_mysql ./influx_mysql.nimble ];
 
-			buildInputs = [ influx-mysql-deps cacert git nim ];
+			buildInputs = [ influx-mysql-deps snappy.out snappy.dev cacert git nim ];
 
 			unpackCmd = customUnpackCmd;
 
@@ -164,8 +178,7 @@ in
 				mkdir -p bin/
 
 				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y c \
-					--cincludes:${snappy}/include \
-					--passL:"-L${snappy}/lib" \
+					${nimSnappyOptions} \
 					--gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_line_protocol_to_sql_cli \
 					influx_mysql/src/influx_line_protocol_to_sql_cli.nim
