@@ -228,6 +228,8 @@ in
 			installPhase = ''
 				mkdir -p $out/bin
 				cp bin/influx_mysql_ignite $out/bin
+			'' + lib.optionalString stdenv.isDarwin ''
+				wrapProgram $out/bin/influx_mysql_ignite --set DYLD_FRAMEWORK_PATH /System/Library/Frameworks
 			'';
 		}
 	;
