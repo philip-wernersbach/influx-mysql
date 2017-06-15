@@ -118,6 +118,8 @@ in
 			installPhase = ''
 				mkdir -p $out/bin
 				cp bin/influx_mysql $out/bin
+			'' + lib.optionalString stdenv.isDarwin ''
+				wrapProgram $out/bin/influx_mysql --set DYLD_FRAMEWORK_PATH /System/Library/Frameworks
 			'';
 		}
 	;
@@ -155,6 +157,8 @@ in
 			installPhase = ''
 				mkdir -p $out/bin
 				cp bin/influxql_to_sql_cli $out/bin
+			'' + lib.optionalString stdenv.isDarwin ''
+				wrapProgram $out/bin/influxql_to_sql_cli --set DYLD_FRAMEWORK_PATH /System/Library/Frameworks
 			'';
 		}
 	;
