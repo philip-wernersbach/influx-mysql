@@ -349,7 +349,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
                     # We only return the name of the functions as the field, and not the name and the arguments.
                     #
                     # We also change "AVG" to "mean" since we change "mean" to "AVG" in the InfluxQL to SQL conversion.
-                    if (fieldName[fieldNameLen-1] == ')') and (fieldNameLen > 4) and
+                    if (fieldNameLen > 4) and (fieldName[fieldNameLen-1] == ')') and
                         (fieldName[0] == 'A') and (fieldName[1] == 'V') and (fieldName[2] == 'G') and (fieldName[3] == '('):
 
                         fieldName = "mean"
