@@ -220,7 +220,7 @@ in
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
 					${nimSnappyOptions} ${nimQtOptions} \
-					--gc:${nimGc} --threads:on ${nimAdditionalOptions} \
+					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} --threads:on ${nimAdditionalOptions} \
 					--out:bin/influx_mysql_ignite \
 					influx_mysql/src/influx_mysql_ignite.nim
 			'';
