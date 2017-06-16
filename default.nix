@@ -38,7 +38,7 @@ licenses of the respective packages.
 	qt5 ? pkgs.qt5, qtbase ? qt5.qtbase, snappy ? pkgs.snappy,
 	cacert ? pkgs.cacert, git ? pkgs.git,
 	nim ? import ./nim_stdlib_rawrecv { inherit pkgs; },
-	nimGc ? "refc", nimAdditionalOptions ? ""
+	nimRelease ? true, nimGc ? "refc", nimAdditionalOptions ? ""
 }:
 
 let
@@ -110,7 +110,7 @@ in
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
 					${nimSnappyOptions} ${nimQtOptions} \
-					--gc:${nimGc} ${nimAdditionalOptions} \
+					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_mysql \
 					influx_mysql/src/influx_mysql.nim
 			'';
@@ -149,7 +149,7 @@ in
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
 					${nimSnappyOptions} ${nimQtOptions} \
-					--gc:${nimGc} ${nimAdditionalOptions} \
+					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influxql_to_sql_cli \
 					influx_mysql/src/influxql_to_sql_cli.nim
 			'';
@@ -183,7 +183,7 @@ in
 
 				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y c \
 					${nimSnappyOptions} \
-					--gc:${nimGc} ${nimAdditionalOptions} \
+					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
 					--out:bin/influx_line_protocol_to_sql_cli \
 					influx_mysql/src/influx_line_protocol_to_sql_cli.nim
 			'';
