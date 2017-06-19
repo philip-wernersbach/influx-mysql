@@ -38,7 +38,7 @@ licenses of the respective packages.
 	qt5 ? pkgs.qt5, qtbase ? qt5.qtbase, snappy ? pkgs.snappy,
 	cacert ? pkgs.cacert, git ? pkgs.git, jdk ? pkgs.jdk8,
 	nim ? import ./nim_stdlib_rawrecv { inherit pkgs; },
-	nimRelease ? true, nimGc ? "refc", nimAdditionalOptions ? ""
+	nimReleaseType ? null, nimGc ? null, nimAdditionalOptions ? ""
 }:
 
 let
@@ -83,6 +83,17 @@ let
 	nimQtOptions = '' --passC:-std=c++11 --cincludes:"${qtbase.dev}/include" --cincludes:"${qtbase.out}/lib" --passL:"-L${qtbase.out}/lib" ''
 		+ lib.optionalString stdenv.isDarwin '' --passC:-F${qtbase.dev}/include --passC:-F${qtbase.out}/lib \
 				--passL:-F${qtbase.dev}/include --passL:-F${qtbase.out}/lib '';
+	
+	# We define debug options explicitly, in order to work around a bug in the Nim compiler.
+	# The bug causes -d:release to override all of the user-specified debug options. The
+	# options below were copied from the release setting of the compiler, with the bound
+	# checks set to on.
+	nimDebugOptions = '' --objChecks:off --fieldChecks:off --rangeChecks:off --boundChecks:on --overflowChecks:off --assertions:off --stackTrace:off --lineTrace:off --debugger:off --lineDir:off --deadCodeElim:on --opt:speed '';
+
+	nimOptions = lib.optionalString (nimReleaseType != null) '' -d:${nimReleaseType} ''
+		+ lib.optionalString (nimGc != null) '' --gc:${nimGc} ''
+		+ nimDebugOptions
+		+ nimAdditionalOptions;
 in
 {
 	influx-mysql =
@@ -109,8 +120,7 @@ in
 				makeWrapper g++ build_support/gcc
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
-					${nimSnappyOptions} ${nimQtOptions} \
-					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
+					${nimSnappyOptions} ${nimQtOptions} ${nimOptions} \
 					--out:bin/influx_mysql \
 					influx_mysql/src/influx_mysql.nim
 			'';
@@ -148,8 +158,7 @@ in
 				makeWrapper g++ build_support/gcc
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
-					${nimSnappyOptions} ${nimQtOptions} \
-					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
+					${nimSnappyOptions} ${nimQtOptions} ${nimOptions} \
 					--out:bin/influxql_to_sql_cli \
 					influx_mysql/src/influxql_to_sql_cli.nim
 			'';
@@ -182,8 +191,7 @@ in
 				mkdir -p bin/
 
 				HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y c \
-					${nimSnappyOptions} \
-					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} ${nimAdditionalOptions} \
+					${nimSnappyOptions} ${nimOptions} \
 					--out:bin/influx_line_protocol_to_sql_cli \
 					influx_mysql/src/influx_line_protocol_to_sql_cli.nim
 			'';
