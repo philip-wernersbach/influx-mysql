@@ -227,8 +227,7 @@ in
 				makeWrapper g++ build_support/gcc
 
 				PATH=build_support:$PATH HOME=${influx-mysql-deps}/share/influx_mysql_deps ${nim}/bin/nimble -y cpp \
-					${nimSnappyOptions} ${nimQtOptions} \
-					'' + lib.optionalString nimRelease '' -d:release '' + '' --gc:${nimGc} --threads:on ${nimAdditionalOptions} \
+					${nimSnappyOptions} ${nimQtOptions} ${nimOptions} \
 					--out:bin/influx_mysql_ignite \
 					influx_mysql/src/influx_mysql_ignite.nim
 			'';
