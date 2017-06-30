@@ -199,7 +199,9 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
 
         case QVariantType(valueVariant.userType):
         of QVariantType.Date, QVariantType.Time, QVariantType.DateTime:
-            var dateTime = valueVariant.toQDateTimeObj
+            # We use internalToQDateTimeObj() because the Nim 0.17.0 compiler generates
+            # a memset if we use toQDateTimeObj().
+            var dateTime = valueVariant.internalToQDateTimeObj
             dateTime.setTimeSpec(QtUtc)
 
             result = dateTime.toJSONField(period, epoch)
@@ -207,24 +209,24 @@ proc toJSONField(record: QSqlRecordObj, i: cint, period: uint64, epoch: EpochFor
         of QVariantType.Bool:
 
             result.kind = JSONFieldKind.Boolean
-            result.booleanVal = valueVariant
+            result.booleanVal = valueVariant.toBool
         
         of QVariantType.Int, QVariantType.LongLong, QVariantType.Char, QVariantType.Long,
             QVariantType.Short, QVariantType.Char2: 
 
             result.kind = JSONFieldKind.Integer
-            result.intVal = valueVariant
+            result.intVal = valueVariant.toQlonglong
 
         of QVariantType.UInt, QVariantType.ULongLong, QVariantType.ULong,
             QVariantType.UShort, QVariantType.UChar:
 
             result.kind = JSONFieldKind.UInteger
-            result.uintVal = valueVariant
+            result.uintVal = valueVariant.toQulonglong
 
         of QVariantType.Double, QVariantType.Float:
 
             result.kind = JSONFieldKind.Float
-            result.floatVal = valueVariant
+            result.floatVal = valueVariant.toDouble
 
         of QVariantType.String:
 
@@ -329,7 +331,10 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
                 # InfluxDB will automatically return NULLs if there is no data for that GROUP BY timeframe block.
                 # SQL databases do not do this, they return nothing if there is no data. So we need to add these
                 # NULLs.
-                var newTime: QDateTimeObj = record.value("time")
+                #
+                # We use internalToQDateTimeObj() because the Nim 0.17.0 compiler generates a memset if we use
+                # toQDateTimeObj().
+                var newTime: QDateTimeObj = record.value("time").internalToQDateTimeObj
                 newTime.setTimeSpec(QtUtc)
 
                 if (period > uint64(0)) and (zeroDateTime < lastTime):

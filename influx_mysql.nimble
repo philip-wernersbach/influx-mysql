@@ -11,4 +11,4 @@ backend       = "cpp"
 
 [Deps]
 
-Requires: "nim >= 0.15.0, qt5_qtsql >= 1.0.3, microasynchttpserver >= 0.10.0"
+Requires: "nim >= 0.15.0, qt5_qtsql >= 1.1.0, microasynchttpserver >= 0.10.0"
