@@ -539,6 +539,13 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add("&p=")
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
+proc logQuery(output: File, logPrefix: string, line: string, sql: string) =
+    output.write(logPrefix)
+    output.write("/query: ")
+    output.write(line)
+    output.write(" --> ")
+    output.writeLine(sql)
+
 proc getQuery(request: Request, params: StringTableRef): Future[void] =
     var internedStrings = initTable[string, ref string]()
 
@@ -554,7 +561,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
     try:
         GC_disable()
 
-        let urlQuery = params["q"]
+        let urlQuery = params.getOrDefault("q")
         let specifiedEpochFormat = params.getOrDefault("epoch")
 
         var epoch = EpochFormat.RFC3339
@@ -570,7 +577,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             else:
                 raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
 
-        if urlQuery == nil:
+        if urlQuery == "":
             raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
 
         var dbName = ""
@@ -590,6 +597,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
 
         for line in urlQuery.splitInfluxQlStatements:
             var series: string
+            var sql = string(nil)
             var period = uint64(0)
             var resultTransform = SQLResultTransform.UNKNOWN
             var fill = ResultFillType.NONE
@@ -597,22 +605,16 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
             var fillMax = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
             var dizcard = initSet[string]()
 
-            let sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard, nowTime)
-
-            when defined(logrequests):
-                stdout.write("/query: ")
-                stdout.write(line)
-                stdout.write(" --> ")
-                stdout.writeLine(sql)
-
             try:
+                sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard, nowTime)
+
+                when defined(logrequests):
+                    stdout.logQuery("Debug: ", line, sql)
+
                 sql.runDBQueryAndUnpack(series, period, fill, fillMin, fillMax, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
                 entries.applyResultTransformation(resultTransform, internedStrings)
-            except DBQueryException:
-                stdout.write("/query: ")
-                stdout.write(line)
-                stdout.write(" --> ")
-                stdout.writeLine(sql)
+            except DBQueryException, ValueError:
+                stderr.logQuery("Error: ", line, if sql != nil: sql else: "<Conversion Failed>")
                 raise getCurrentException()
 
         if cache != false:
@@ -744,6 +746,25 @@ proc postReadLines(context: ReadLinesFutureContext not nil) =
     finally:
         GC_enable()
 
+proc mget[T](future: Future[T]): var T = asyncdispatch.mget(cast[FutureVar[T]](future))
+proc clean[T](future: Future[T]) = asyncdispatch.clean(cast[FutureVar[T]](future))
+
+template newReadLinesFutureContext(compressed: bool, contentLength: int, request: Request, params: StringTableRef,
+        retFuture: Future[ReadLinesFutureContext], routerResult: Future[void]): ReadLinesFutureContext not nil =
+    
+    ReadLinesFutureContext(super: newReadLinesContext(compressed,
+            if "replace" != params.getOrDefault("sql_insert_type"): SQLInsertType.INSERT else: SQLInsertType.REPLACE,
+            ("true" == params.getOrDefault("schemaful")), nil),
+        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params,
+        retFuture: retFuture, routerResult: routerResult)
+
+proc newReadLinesFutureContextZeroRead(compressed: bool, contentLength: int, request: Request, params: StringTableRef,
+    retFuture: Future[ReadLinesFutureContext], routerResult: Future[void]): ReadLinesFutureContext not nil {.inline.} =
+
+    result = newReadLinesFutureContext(compressed, contentLength, request, params, retFuture, routerResult)
+    result.super.lines = ""
+    result.read = 0
+
 proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLinesFutureContext] =
     var contentLength = 0
     var compressed = false
@@ -751,13 +772,29 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
 
     result = newFuture[ReadLinesFutureContext]("postReadLines")
 
+    let params = getParams(request)
+
     if request.headers.hasKey("Content-Length"):
-        contentLength = request.headers["Content-Length"].parseInt
+        try:
+            contentLength = request.headers["Content-Length"].parseInt
+        except ValueError:
+            # We complete and then clean the result future before failing the result, so that we can pass a context to the
+            # error callback for the result.
+            result.complete(newReadLinesFutureContextZeroRead(compressed, contentLength, request, params, result, routerResult))
+            result.clean
+
+            result.fail(newException(IOError, "Specified Content-Length is not a valid integer!"))
+            return
 
     if request.headers.hasKey("Content-Encoding"):
         contentEncoding = request.headers["Content-Encoding"]
 
     if contentLength == 0:
+        # We complete and then clean the result future before failing the result, so that we can pass a context to the
+        # error callback for the result.
+        result.complete(newReadLinesFutureContextZeroRead(compressed, contentLength, request, params, result, routerResult))
+        result.clean
+
         result.fail(newException(IOError, "Content-Length required, but not provided!"))
         #result = request.respond(Http400, "Content-Length required, but not provided!", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
         return
@@ -766,22 +803,26 @@ proc postReadLines(request: Request, routerResult: Future[void]): Future[ReadLin
         if contentEncoding == "snappy":
             compressed = true
         else:
+            # We complete and then clean the result future before failing the result, so that we can pass a context to the
+            # error callback for the result.
+            result.complete(newReadLinesFutureContextZeroRead(compressed, contentLength, request, params, result, routerResult))
+            result.clean
+
             result.fail(newException(IOError, "Content-Encoding \"" & contentEncoding & "\" not supported!"))
             return
 
-    let params = getParams(request)
-
+    # We manually inline newReadLinesFutureContext() here, because calling it doesn't work here, because we use the request
+    # variable as a tuple field value.
     var context = ReadLinesFutureContext(super: newReadLinesContext(compressed,
             if "replace" != params.getOrDefault("sql_insert_type"): SQLInsertType.INSERT else: SQLInsertType.REPLACE,
             ("true" == params.getOrDefault("schemaful")), nil),
-        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params, retFuture: result, routerResult: routerResult)
+        contentLength: contentLength, read: 0, noReadsCount: 0, readNow: newString(BufferSize), request: request, params: params,
+        retFuture: result, routerResult: routerResult)
 
     context.super.lines = request.client.recvWholeBuffer
     context.read = context.super.lines.len
 
     context.postReadLines
-
-proc mget[T](future: Future[T]): var T = asyncdispatch.mget(cast[FutureVar[T]](future))
 
 proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
     try:
@@ -846,6 +887,7 @@ proc router(request: Request): Future[void] =
         request.basicAuthToUrlParam
 
         when defined(logrequests):
+            stdout.write("Debug: ")
             stdout.write(request.url.path)
             stdout.write('?')
             stdout.writeLine(request.url.query)
@@ -886,6 +928,7 @@ proc router(request: Request): Future[void] =
 
         # Fall through on purpose, we didn't have a matching route.
         let responseMessage = "Route not found for [reqMethod=" & $request.reqMethod & ", url=" & request.url.path & "]"
+        stdout.write("Info: ")
         stdout.writeLine(responseMessage)
 
         request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod)).callback = (x: Future[void]) => routerHandleError(request, x)

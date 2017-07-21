@@ -64,6 +64,7 @@ proc runDBQueryWithTransaction*(sql: cstring, dbName: cstring, dbUsername: cstri
 proc processSQLEntryValuesAndRunDBQuery*(entries: var Table[ref string, SQLEntryValues], insertType: SQLInsertType, dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
     entries.processSQLEntryValues(insertType):
         when defined(logrequests):
+            stdout.write("Debug: ")
             stdout.write("/write: ")
             stdout.writeLine(sql)
 
@@ -72,6 +73,7 @@ proc processSQLEntryValuesAndRunDBQuery*(entries: var Table[ref string, SQLEntry
 proc processSQLTableInsertsAndRunDBQuery*(inserts: var Table[string, ref SQLTableInsert], dbName: cstring, dbUsername: cstring, dbPassword: cstring) {.inline.} =
     inserts.processSQLTableInserts:
         when defined(logrequests):
+            stdout.write("Debug: ")
             stdout.write("/write: ")
             stdout.writeLine(insert.sql)
 

@@ -48,6 +48,7 @@ proc linesToSQLEntryValues*(context: var ReadLinesContext) {.inline.} =
 
         if context.line.len > 0:
             when defined(logrequests):
+                stdout.write("Debug: ")
                 stdout.write("/write: ")
                 stdout.writeLine(context.line)
 
