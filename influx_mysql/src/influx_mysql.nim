@@ -548,9 +548,32 @@ proc withCorsIfNeeded(headers: HttpHeaders, allowMethods: string): HttpHeaders =
 template withCorsIfNeeded(headers: HttpHeaders, allowMethod: HttpMethod): HttpHeaders =
     headers.withCorsIfNeeded($allowMethod)
 
+template safeRespond(req: Request, code: HttpCode, content: string, headers: HttpHeaders): Future[void] =
+    if req.client.isClosed == false:
+        req.respond(code, content, headers)
+    else:
+        let ret = newFuture[void]("safeRespond")
+
+        ret.complete()
+        ret
+
+proc respondError(request: Request, code: HttpCode, eMsg: string): Future[void] =
+    case code:
+    of Http503:
+        result = request.safeRespond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RETRY_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
+    else:
+        result = request.safeRespond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
+
+proc respondError(request: Request, e: ref Exception, eMsg: string): Future[void] =
+    stderr.write(e.getStackTrace())
+    stderr.write("Error: unhandled exception: ")
+    stderr.writeLine(eMsg)
+
+    result = request.respondError(Http400, eMsg)
+
 proc getOrHeadPing(request: Request): Future[void] =
     let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
-    result = request.respond(Http204, "", PING_RESPONSE_HEADERS.withCorsIfNeeded(PING_HTTP_METHODS))
+    result = request.safeRespond(Http204, "", PING_RESPONSE_HEADERS.withCorsIfNeeded(PING_HTTP_METHODS))
 
 proc basicAuthToUrlParam(request: var Request) =
     if not request.headers.hasKey("Authorization"):
@@ -571,20 +594,6 @@ proc basicAuthToUrlParam(request: var Request) =
 
     request.url.query.add("&p=")
     request.url.query.add(userNameAndPassword[1].encodeUrl)
-
-proc respondError(request: Request, code: HttpCode, eMsg: string) =
-    case code:
-    of Http503:
-        asyncCheck request.respond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RETRY_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
-    else:
-        asyncCheck request.respond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
-
-proc respondError(request: Request, e: ref Exception, eMsg: string) =
-    stderr.write(e.getStackTrace())
-    stderr.write("Error: unhandled exception: ")
-    stderr.writeLine(eMsg)
-
-    request.respondError(Http400, eMsg)
 
 proc logQuery(output: File, logPrefix: string, line: string, sql: string) =
     output.write(logPrefix)
@@ -672,9 +681,9 @@ proc sendQueryResponse(request: Request, routerResult: Future[void], outputId: i
         case output.kind:
         of EitherKind.A:
             if output.a.cache == true:
-                asyncCheck request.respond(Http200, output.a.response, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+                asyncCheck request.safeRespond(Http200, output.a.response, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
             else:
-                asyncCheck request.respond(Http200, output.a.response, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+                asyncCheck request.safeRespond(Http200, output.a.response, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
 
             routerResult.complete
         of EitherKind.B:
@@ -740,10 +749,7 @@ proc getQuery(request: Request, params: StringTableRef): Future[void] =
 
         result = routerResult
     else:
-        request.respondError(Http503, "Unable to service request, no query workers available. Please try again.")
-
-        result = newFuture[void]("getQuery")
-        result.complete
+        result = request.respondError(Http503, "Unable to service request, no query workers available. Please try again.")
 
 template getQuery(request: Request): Future[void] =
     getQuery(request, getParams(request))
@@ -758,7 +764,7 @@ proc postQuery(request: Request): Future[void] =
         # then the InfluxDB client is requesting the server's registration data. This isn't an actual InfluxDB server,
         # so we aren't officially registered.
         let date = getTime().getGMTime.format("ddd, dd MMM yyyy HH:mm:ss 'GMT'")
-        result = request.respond(Http200, "{\"results\":[{}]}", REGISTRATION_DATA_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+        result = request.safeRespond(Http200, "{\"results\":[{}]}", REGISTRATION_DATA_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
 
 import posix
 
@@ -849,7 +855,7 @@ proc postReadLines(context: ReadLinesFutureContext not nil) =
     except IOError, ValueError, TimeoutError:
         context.routerResult.complete
 
-        context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
+        asyncCheck context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
         context.destroyReadLinesFutureContext
     finally:
         GC_enable()
@@ -957,7 +963,7 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
             else:
                 context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(context.super.sqlInsertType, 0, dbName, dbUsername, dbPassword)
 
-            asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
+            asyncCheck context.request.safeRespond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 
             context.destroyReadLinesFutureContext
         else:
@@ -966,7 +972,7 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
         let context = ioResult.mget
 
         if context != nil:
-            context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
+            asyncCheck context.request.respondError(getCurrentException(), getCurrentExceptionMsg())
             context.destroyReadLinesFutureContext
         else:
             raise newException(Exception, "Context is nil! (This cannot happen under regular runtime.)")
@@ -978,13 +984,13 @@ template postWrite(request: Request, routerResult: Future[void]) =
     ioResult.callback = postWriteProcess
 
 template optionsCors(request: Request, allowMethods: string): Future[void] =
-    request.respond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
+    request.safeRespond(Http200, "", TEXT_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(allowMethods))
 
 proc routerHandleError(request: Request, processingResult: Future[void]) =
     try:
         processingResult.read
     except IOError, ValueError, TimeoutError:
-        request.respondError(getCurrentException(), getCurrentExceptionMsg())
+        asyncCheck request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
 proc router(request: Request): Future[void] =
     var request = request
@@ -1039,12 +1045,12 @@ proc router(request: Request): Future[void] =
         stdout.write("Info: ")
         stdout.writeLine(responseMessage)
 
-        request.respond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod)).callback = (x: Future[void]) => routerHandleError(request, x)
+        asyncCheck request.safeRespond(Http400, responseMessage, TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
     except IOError, ValueError, TimeoutError:
         if not result.finished:
             result.complete
 
-        request.respondError(getCurrentException(), getCurrentExceptionMsg())
+        asyncCheck request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
 proc initThreads() =
     setMinPoolSize(1)
