@@ -60,4 +60,7 @@ template cmdlineMain*(postamble: untyped): typed {.dirty.} =
 
         initBackendDB(dbHostnameString, dbPort)
 
-        postamble
+        try:
+            postamble
+        finally:
+            unInitBackendDB()

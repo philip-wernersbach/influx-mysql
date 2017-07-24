@@ -15,6 +15,7 @@ when defined(enabletheprofiler):
 import future
 import strtabs
 import strutils
+import threadpool
 import asyncdispatch
 import asyncnet
 import httpcore
@@ -47,7 +48,7 @@ type
     URLParameterNotFoundError = object of URLParameterError
     URLParameterInvalidError = object of URLParameterError
 
-    DBQueryResultTransformationException = object of DBQueryException
+    DBQueryResultTransformationException = object of DBException
 
     SeriesAndData = tuple
         fill: ResultFillType
@@ -116,6 +117,32 @@ type
         retFuture: Future[ReadLinesFutureContext]
         routerResult: Future[void]
 
+    EitherKind {.pure.} = enum
+        A,
+        B
+
+    Either[A, B] = object
+        case kind: EitherKind
+        of EitherKind.A: a: A
+        of EitherKind.B: b: B
+
+    QueryThreadOutput = tuple
+        cache: bool
+        response: string
+
+static:
+    if MAX_DB_CONNECTIONS < 2:
+        raise newException(Exception, "The lowest value of maxdbconnections allowed is 2, but you specified " & $MAX_DB_CONNECTIONS & "!")
+
+const THREAD_OUTPUTS_SIZE = MAX_DB_CONNECTIONS
+
+when getEnv("maxthreadpoolsize") != "":
+    const MAX_THREAD_POOL_SIZE_USER_SPECIFIED = getEnv("maxthreadpoolsize").parseInt
+
+    static:
+        if MAX_THREAD_POOL_SIZE_USER_SPECIFIED > MaxThreadPoolSize:
+            raise newException(Exception, "The maximum thread pool size that the standard library supports is " & $MaxThreadPoolSize & ", but you specified a runtime thread pool size of " & $MAX_THREAD_POOL_SIZE_USER_SPECIFIED & "!")
+
 const QUERY_HTTP_METHODS = "GET, POST"
 const WRITE_HTTP_METHODS = "POST"
 const PING_HTTP_METHODS = "GET, HEAD"
@@ -132,11 +159,17 @@ const cacheControlDoCacheHeader = "public, max-age=" & cachecontrolmaxage & ", s
 
 var corsAllowOrigin: cstring = nil
 
+var usedQueryOutputs: array[THREAD_OUTPUTS_SIZE, bool]
+var queryThreadOutputs: array[THREAD_OUTPUTS_SIZE, Channel[Either[QueryThreadOutput, ref Exception]]]
+
 template JSON_CONTENT_TYPE_RESPONSE_HEADERS(): HttpHeaders =
     newHttpHeaders([("Content-Type", "application/json"), ("Cache-Control", cacheControlDoCacheHeader)])
 
 template JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): HttpHeaders =
     newHttpHeaders([("Content-Type", "application/json"), ("Cache-Control", cacheControlDontCacheHeader)])
+
+template JSON_CONTENT_TYPE_NO_CACHE_RETRY_RESPONSE_HEADERS(): HttpHeaders =
+    newHttpHeaders([("Content-Type", "application/json"), ("Cache-Control", cacheControlDontCacheHeader), ("Retry-After", "1")])
 
 template TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS(): HttpHeaders =
     newHttpHeaders([("Content-Type", "text/plain"), ("Cache-Control", cacheControlDontCacheHeader)])
@@ -298,13 +331,13 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
                          fill: ResultFillType, fillMin: uint64, fillMax: uint64,
                          dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
-                         dbName: string, dbUsername: string, dbPassword: string)  =
+                         dbConnectionId: int, dbName: string, dbUsername: string, dbPassword: string)  =
 
     let jsonPeriod = if period != 0: period else: uint64(1)
     var zeroDateTime = newQDateTimeObj(0, QtUtc)
     let timeInterned = internedStrings["time"]
 
-    useDB(dbName, dbUsername, dbPassword):
+    useDB(dbConnectionId, dbName, dbUsername, dbPassword):
         block:
             "SET time_zone='+0:00'".useQuery(database)
 
@@ -539,6 +572,20 @@ proc basicAuthToUrlParam(request: var Request) =
     request.url.query.add("&p=")
     request.url.query.add(userNameAndPassword[1].encodeUrl)
 
+proc respondError(request: Request, code: HttpCode, eMsg: string) =
+    case code:
+    of Http503:
+        asyncCheck request.respond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RETRY_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
+    else:
+        asyncCheck request.respond(code, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
+
+proc respondError(request: Request, e: ref Exception, eMsg: string) =
+    stderr.write(e.getStackTrace())
+    stderr.write("Error: unhandled exception: ")
+    stderr.writeLine(eMsg)
+
+    request.respondError(Http400, eMsg)
+
 proc logQuery(output: File, logPrefix: string, line: string, sql: string) =
     output.write(logPrefix)
     output.write("/query: ")
@@ -546,89 +593,157 @@ proc logQuery(output: File, logPrefix: string, line: string, sql: string) =
     output.write(" --> ")
     output.writeLine(sql)
 
-proc getQuery(request: Request, params: StringTableRef): Future[void] =
-    var internedStrings = initTable[string, ref string]()
+proc runQuery(urlQuery: string, dbName: string, dbUsername: string, dbPassword: string, epoch: EpochFormat, outputId: int) {.thread.} =
+    # We use a block here so that a new stack frame is created. When the query is finished
+    # this stack frame is popped, so at the end of the function we can garbage collect
+    # everything.
+    block:
+        var entries: DoublyLinkedList[SeriesAndData]
 
-    var timeInterned: ref string
-    new(timeInterned)
-    timeInterned[] = "time"
-
-    internedStrings["time"] = timeInterned
-
-    var entries = initDoublyLinkedList[SeriesAndData]()
-    let nowTime = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
-
-    try:
-        GC_disable()
-
-        let urlQuery = params.getOrDefault("q")
-        let specifiedEpochFormat = params.getOrDefault("epoch")
-
-        var epoch = EpochFormat.RFC3339
-
-        if specifiedEpochFormat != "":
-            case specifiedEpochFormat:
-            of "h": epoch = EpochFormat.Hour
-            of "m": epoch = EpochFormat.Minute
-            of "s": epoch = EpochFormat.Second
-            of "ms": epoch = EpochFormat.Millisecond
-            of "u": epoch = EpochFormat.Microsecond
-            of "ns": epoch = EpochFormat.Nanosecond
-            else:
-                raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
-
-        if urlQuery == "":
-            raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
-
-        var dbName = ""
-        var dbUsername = ""
-        var dbPassword = ""
-
-        if params.hasKey("db"):
-            dbName = params["db"]
-
-        if params.hasKey("u"):
-            dbUsername = params["u"]
-
-        if params.hasKey("p"):
-            dbPassword = params["p"]
-
-        var cache = true
-
-        for line in urlQuery.splitInfluxQlStatements:
-            var series: string
-            var sql = string(nil)
-            var period = uint64(0)
-            var resultTransform = SQLResultTransform.UNKNOWN
-            var fill = ResultFillType.NONE
-            var fillMin = uint64(0)
-            var fillMax = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
-            var dizcard = initSet[string]()
-
-            try:
-                sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard, nowTime)
-
-                when defined(logrequests):
-                    stdout.logQuery("Debug: ", line, sql)
-
-                sql.runDBQueryAndUnpack(series, period, fill, fillMin, fillMax, dizcard, epoch, entries, internedStrings, dbName, dbUsername, dbPassword)
-                entries.applyResultTransformation(resultTransform, internedStrings)
-            except DBQueryException, ValueError:
-                stderr.logQuery("Error: ", line, if sql != nil: sql else: "<Conversion Failed>")
-                raise getCurrentException()
-
-        if cache != false:
-            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
-        else:
-            result = request.respond(Http200, entries.toQueryResponse, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
-    finally:
         try:
-            # SQLEntryValues.entries is a manually allocated object, so we
-            # need to free it.
-            for entry in entries.items:
-                entry.entries.removeAll
+            var cache = true
+            var timeInterned: ref string
+
+            GC_disable()
+
+            entries = initDoublyLinkedList[SeriesAndData]()
+
+            new(timeInterned)
+            timeInterned[] = "time"
+
+            var internedStrings = initTable[string, ref string]()
+            internedStrings["time"] = timeInterned
+
+            let nowTime = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
+
+            for line in urlQuery.splitInfluxQlStatements:
+                var series: string
+                var sql = string(nil)
+                var period = uint64(0)
+                var resultTransform = SQLResultTransform.UNKNOWN
+                var fill = ResultFillType.NONE
+                var fillMin = uint64(0)
+                var fillMax = uint64(currentQDateTimeUtc().toMSecsSinceEpoch)
+                var dizcard = initSet[string]()
+
+                try:
+                    sql = line.influxQlToSql(resultTransform, series, period, fill, fillMin, fillMax, cache, dizcard, nowTime)
+
+                    when defined(logrequests):
+                        stdout.logQuery("Debug: ", line, sql)
+
+                    sql.runDBQueryAndUnpack(series, period, fill, fillMin, fillMax, dizcard, epoch, entries, internedStrings, outputId, dbName, dbUsername, dbPassword)
+                    entries.applyResultTransformation(resultTransform, internedStrings)
+                except DBException, ValueError:
+                    stderr.logQuery("Error: ", line, if sql != nil: sql else: "<Conversion Failed>")
+                    raise getCurrentException()
+
+            queryThreadOutputs[outputId].send(Either[QueryThreadOutput, ref Exception](kind: EitherKind.A, a: (cache: cache, response: entries.toQueryResponse)))
+        except DBException, ValueError:
+            queryThreadOutputs[outputId].send(Either[QueryThreadOutput, ref Exception](kind: EitherKind.B, b: getCurrentException()))
         finally:
-            GC_enable()
+            try:
+                # SQLEntryValues.entries is a manually allocated object, so we
+                # need to free it.
+                for entry in entries.items:
+                    entry.entries.removeAll
+            finally:
+                GC_enable()
+
+    # At this point, all of the garbage we generated while processing the query can be collected.
+    # So we run a full collection so that our allocated memory can be reused for the next query!
+    #
+    # The interesting thing about this threading model is that running garbage collection here has
+    # negligible concurrency impact. At this point, this thread is marked as "taken" in the thread
+    # pool, so new queries will be scheduled on other threads. We've also sent the query result
+    # back to the main thread, so it will continue processing. On top of that, the GC is thread
+    # local, so we can run a garbage collection without impacting other threads.
+    #
+    # We run garbage collection multiple times so objects that are in cycles can be freed.
+    GC_fullCollect()
+    GC_fullCollect()
+
+proc sendQueryResponse(request: Request, routerResult: Future[void], outputId: int) =
+    let (dataAvailable, output) = queryThreadOutputs[outputId].tryRecv()
+
+    if dataAvailable == true:
+        usedQueryOutputs[outputId] = false
+
+        case output.kind:
+        of EitherKind.A:
+            if output.a.cache == true:
+                asyncCheck request.respond(Http200, output.a.response, JSON_CONTENT_TYPE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+            else:
+                asyncCheck request.respond(Http200, output.a.response, JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(QUERY_HTTP_METHODS))
+
+            routerResult.complete
+        of EitherKind.B:
+            routerResult.fail(output.b)
+    else:
+        let sleepFuture = sleepAsync(125)
+
+        sleepFuture.callback = (proc(future: Future[void]) =
+            request.sendQueryResponse(routerResult, outputId)
+        )
+
+proc getQuery(request: Request, params: StringTableRef): Future[void] =
+    let urlQuery = params.getOrDefault("q")
+    let specifiedEpochFormat = params.getOrDefault("epoch")
+
+    var epoch = EpochFormat.RFC3339
+
+    if specifiedEpochFormat != "":
+        case specifiedEpochFormat:
+        of "h": epoch = EpochFormat.Hour
+        of "m": epoch = EpochFormat.Minute
+        of "s": epoch = EpochFormat.Second
+        of "ms": epoch = EpochFormat.Millisecond
+        of "u": epoch = EpochFormat.Microsecond
+        of "ns": epoch = EpochFormat.Nanosecond
+        else:
+            raise newException(URLParameterInvalidError, "Invalid epoch parameter specified!")
+
+    if urlQuery == "":
+        raise newException(URLParameterNotFoundError, "No \"q\" query parameter specified!")
+
+    var dbName = ""
+    var dbUsername = ""
+    var dbPassword = ""
+
+    if params.hasKey("db"):
+        dbName = params["db"]
+
+    if params.hasKey("u"):
+        dbUsername = params["u"]
+
+    if params.hasKey("p"):
+        dbPassword = params["p"]
+
+    var outputId = -1
+
+    # We purposely start from one here, because connection zero is reserved for the main thread.
+    for i in countUp(1, THREAD_OUTPUTS_SIZE - 1):
+        if usedQueryOutputs[i] == false:
+            outputId = i
+            usedQueryOutputs[i] = true
+
+            break
+
+    if outputId > -1:
+        spawn urlQuery.runQuery(dbName, dbUsername, dbPassword, epoch, outputId)
+
+        let routerResult = newFuture[void]("getQuery")
+
+        callSoon(proc() =
+            request.sendQueryResponse(routerResult, outputId)
+        )
+
+        result = routerResult
+    else:
+        request.respondError(Http503, "Unable to service request, no query workers available. Please try again.")
+
+        result = newFuture[void]("getQuery")
+        result.complete
 
 template getQuery(request: Request): Future[void] =
     getQuery(request, getParams(request))
@@ -672,13 +787,6 @@ proc destroyReadLinesFutureContext(context: ReadLinesFutureContext not nil) =
             context.super.destroyed = true
         finally:
             GC_enable()
-
-proc respondError(request: Request, e: ref Exception, eMsg: string) =
-    stderr.write(e.getStackTrace())
-    stderr.write("Error: unhandled exception: ")
-    stderr.writeLine(eMsg)
-
-    asyncCheck request.respond(Http400, $( %*{ "error": eMsg } ), JSON_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(request.reqMethod))
 
 proc postReadLines(context: ReadLinesFutureContext not nil) =
     try:
@@ -845,9 +953,9 @@ proc postWriteProcess(ioResult: Future[ReadLinesFutureContext]) =
                 dbPassword = context.params["p"]
 
             if context.super.schemaful != nil:
-                context.super.schemaful.inserts.processSQLTableInsertsAndRunDBQuery(dbName, dbUsername, dbPassword)
+                context.super.schemaful.inserts.processSQLTableInsertsAndRunDBQuery(0, dbName, dbUsername, dbPassword)
             else:
-                context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(context.super.sqlInsertType, dbName, dbUsername, dbPassword)
+                context.super.schemaless.entries.processSQLEntryValuesAndRunDBQuery(context.super.sqlInsertType, 0, dbName, dbUsername, dbPassword)
 
             asyncCheck context.request.respond(Http204, "", TEXT_CONTENT_TYPE_NO_CACHE_RESPONSE_HEADERS.withCorsIfNeeded(WRITE_HTTP_METHODS))
 
@@ -938,6 +1046,16 @@ proc router(request: Request): Future[void] =
 
         request.respondError(getCurrentException(), getCurrentExceptionMsg())
 
+proc initThreads() =
+    setMinPoolSize(1)
+
+    when declared(MAX_THREAD_POOL_SIZE_USER_SPECIFIED):
+        setMaxPoolSize(MAX_THREAD_POOL_SIZE_USER_SPECIFIED)
+
+    for i in countUp(0, THREAD_OUTPUTS_SIZE - 1):
+        usedQueryOutputs[i] = false
+        queryThreadOutputs[i].open
+
 proc quitUsage() =
     stderr.writeLine("Usage: influx_mysql <mysql address:mysql port> <influxdb address:influxdb port> [cors allowed origin]")
     quit(QuitFailure)
@@ -952,6 +1070,11 @@ cmdlineMain():
         stderr.writeLine("Error: Too many arguments specified!")
         quitUsage()
 
+    initInfluxLineProtocolToSQL()
+    initThreads()
+
+    var quitFailure = false
+
     try:
         waitFor newMicroAsyncHttpServer().serve(Port(httpServerPort), router, httpServerHostname)
     except Exception:
@@ -960,4 +1083,9 @@ cmdlineMain():
         stderr.write("Error: unhandled exception: ")
         stderr.writeLine(getCurrentExceptionMsg())
 
+        quitFailure = true
+    finally:
+        threadpool.sync()
+
+    if quitFailure == true:
         quit(QuitFailure)
