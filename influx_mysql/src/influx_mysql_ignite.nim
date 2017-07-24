@@ -22,7 +22,7 @@ import influx_mysql_cmdline
 import influx_mysql_backend
 import influx_mysql_backend_db
 
-const MAX_SERVER_SUBMIT_THREADS = 16
+const MAX_SERVER_SUBMIT_THREADS = MAX_DB_CONNECTIONS
 
 type
     JavaOperationException = object of Exception
@@ -100,13 +100,11 @@ iterator waitEachWhileContinueRunning(queue: SynchronousQueue[CompressedBatchPoi
             currentEnv.PopLocalFrameNullReturn
 
 proc runDBQueryWithTransaction(id: int) {.thread.} =
-    initBackendDBForThread("influx_mysql" & $id)
-
     try:
         while threadInputs[id].recv:
             let context = threadInputsData[id]
 
-            context.sql.runDBQueryWithTransaction(context.dbName, context.dbUsername, context.dbPassword)
+            context.sql.runDBQueryWithTransaction(id, context.dbName, context.dbUsername, context.dbPassword)
             threadOutputs[id].send(true)
     except Exception:
         threadOutputs[id].send(false)
