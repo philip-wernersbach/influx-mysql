@@ -21,7 +21,6 @@ import asyncnet
 import httpcore
 import asynchttpserver
 from net import BufferSize, TimeoutError
-import lists
 import tables
 import json
 import base64
@@ -34,7 +33,7 @@ import qt5_qtsql
 import snappy as snappy
 
 import stdlib_extra
-import reflists
+import appendlists
 import vendor/picohttpparser_c
 import microasynchttpserver
 import influxql_to_sql
@@ -53,8 +52,8 @@ type
     SeriesAndData = tuple
         fill: ResultFillType
         series: string
-        order: OrderedTableRef[ref string, bool] not nil
-        entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil
+        order: OrderedTable[ref string, bool]
+        entries: AppendList[TableRef[ref string, JSONField]]
 
     # InfluxDB only supports four data types, which makes this easy
     # We add a fifth one so that we can properly support unsigned integers
@@ -302,7 +301,7 @@ proc `==`(a: JSONField, b: JSONField): bool =
 #
 # This function is in the query fast path, so any optimizations here will yield
 # a huge performance improvement.
-proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil, order: OrderedTableRef[ref string, bool] not nil,
+proc addFill(entries: var AppendList[TableRef[ref string, JSONField]], order: var OrderedTable[ref string, bool],
                 lastTime: QDateTimeObj, newTime: QDateTimeObj, period: uint64, epoch: EpochFormat, timeInterned: ref string) =
 
     var lastTime = lastTime
@@ -321,7 +320,7 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
         if lastTimeField == newTimeField:
             break
 
-        var entryValues = newTable[ref string, JSONField]()
+        var entryValues = newTable[ref string, JSONField](tables.rightSize(1))
         entryValues[timeInterned] = lastTimeField
 
         entries.append(entryValues)
@@ -330,7 +329,7 @@ proc addFill(entries: SinglyLinkedRefList[Table[ref string, JSONField]] not nil,
 
 proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
                          fill: ResultFillType, fillMin: uint64, fillMax: uint64,
-                         dizcard: HashSet[string], epoch: EpochFormat, result: var DoublyLinkedList[SeriesAndData], internedStrings: var Table[string, ref string],
+                         dizcard: HashSet[string], epoch: EpochFormat, result: var seq[SeriesAndData], internedStrings: var Table[string, ref string],
                          dbConnectionId: int, dbName: string, dbUsername: string, dbPassword: string)  =
 
     let jsonPeriod = if period != 0: period else: uint64(1)
@@ -343,20 +342,17 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
         sql.useQuery(database)
 
-        var entries = newSinglyLinkedRefList[Table[ref string, JSONField]]()
-        var seriesAndData: SeriesAndData = (fill: fill, series: series, order: cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable[ref string, bool]()), 
-                                entries: entries)
-        result.append(seriesAndData)
-
-        var order = seriesAndData.order
+        var entries = initAppendListOfCap[TableRef[ref string, JSONField]](query.size)
+        var order = initOrderedTable[ref string, bool]()
 
         var lastTime = if fillMin > uint64(period): newQDateTimeObj(qint64(fillMin - period), QtUtc) else: zeroDateTime
 
         while query.next() == true:
             var record = query.record
-            let count = record.count - 1
+            let count = record.count
+            let recordIdxMax = count - 1
 
-            var entryValues = newTable[ref string, JSONField]()
+            var entryValues = newTable[ref string, JSONField](tables.rightSize(count))
 
             if fill != ResultFillType.NONE:
                 # For strict InfluxDB compatibility:
@@ -375,7 +371,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
                 lastTime = newTime
 
-            for i in countUp(0, count):
+            for i in countUp(0, recordIdxMax):
                 var fieldNameConst = record.fieldName(i).toUtf8.constData.umc
                 var fieldName: string = fieldNameConst.strdup
 
@@ -392,8 +388,13 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
                         fieldName = "mean"
 
-                    var fieldNameInterned = internedStrings.getOrDefault(fieldName)
-                    if fieldNameInterned == nil:
+                    var fieldNameInterned: ref string
+
+                    internedStrings.withValue(fieldName, value) do:
+                        # Called when internedStrings contains fieldName.
+                        fieldNameInterned = value[]
+                    do:
+                        # Called when internedStrings does not contain fieldName.
                         new(fieldNameInterned)
                         fieldNameInterned[] = fieldName
 
@@ -422,6 +423,7 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
             lastTime = newTime
 
+        result.add((fill: fill, series: series, order: order, entries: entries))
 
 converter toJsonNode(field: JSONField): JsonNode =
     case field.kind:
@@ -453,7 +455,12 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
             var entryArray = newJArray()
 
             for column in kv.order.keys:
-                entryArray.add(entry.mgetOrPut(column, fillField))
+                entry[].withValue(column, value) do:
+                    # Called when column is in entry.
+                    entryArray.add(value[])
+                do:
+                    # Called when column is not in entry.
+                    entryArray.add(fillField)
 
             valuesArray.add(entryArray)
     else:
@@ -470,7 +477,7 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
     seriesArray.add(seriesObject)
     result.add("series", seriesArray)
 
-proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
+proc toQueryResponse(ev: seq[SeriesAndData]): string =
     var json = newJObject()
     var results = newJArray()
 
@@ -494,15 +501,15 @@ proc toQueryResponse(ev: DoublyLinkedList[SeriesAndData]): string =
     result = $json
 
 # Applies the specified results transformation to the last series in the list.
-proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransform: SQLResultTransform, internedStrings: var Table[string, ref string]) =
+proc applyResultTransformation(ev: var seq[SeriesAndData], resultTransform: SQLResultTransform, internedStrings: var Table[string, ref string]) =
     case resultTransform:
     of SQLResultTransform.NONE:
         discard
     of SQLResultTransform.SHOW_DATABASES:
-        let series = ev.tail
+        let last = ev.len - 1
         let databaseInterned = internedStrings.getOrDefault("Database")
 
-        if (series[].value.series.len == 0) and (series[].value.order.len == 1) and (databaseInterned != nil) and (series[].value.order.hasKey(databaseInterned)):
+        if (ev[last].series.len == 0) and (ev[last].order.len == 1) and (databaseInterned != nil) and (ev[last].order.hasKey(databaseInterned)):
             var nameInterned = internedStrings.getOrDefault("name")
             if nameInterned == nil:
                 new(nameInterned)
@@ -510,13 +517,14 @@ proc applyResultTransformation(ev: DoublyLinkedList[SeriesAndData], resultTransf
 
                 internedStrings["name"] = nameInterned
 
-            series[].value.series = "databases"
+            ev[last].series = "databases"
 
             # Replacing the order table is a workaround, as the standard library doesn't have a del() implementation for
             # OrderedTables.
-            series[].value.order = cast[OrderedTableRef[ref string, bool] not nil](newOrderedTable([(nameInterned, true)]))
+            ev[last].order = initOrderedTable[ref string, bool]()
+            ev[last].order[nameInterned] = true
 
-            for entry in series[].value.entries.items:
+            for entry in ev[last].entries.items:
                 entry[nameInterned] = entry[databaseInterned]
                 entry.del(databaseInterned)
 
@@ -607,7 +615,7 @@ proc runQuery(urlQuery: string, dbName: string, dbUsername: string, dbPassword: 
     # this stack frame is popped, so at the end of the function we can garbage collect
     # everything.
     block:
-        var entries: DoublyLinkedList[SeriesAndData]
+        var entries: seq[SeriesAndData]
 
         try:
             var cache = true
@@ -615,7 +623,7 @@ proc runQuery(urlQuery: string, dbName: string, dbUsername: string, dbPassword: 
 
             GC_disable()
 
-            entries = initDoublyLinkedList[SeriesAndData]()
+            entries = newSeq[SeriesAndData]()
 
             new(timeInterned)
             timeInterned[] = "time"
@@ -651,13 +659,7 @@ proc runQuery(urlQuery: string, dbName: string, dbUsername: string, dbPassword: 
         except DBException, ValueError:
             queryThreadOutputs[outputId].send(Either[QueryThreadOutput, ref Exception](kind: EitherKind.B, b: getCurrentException()))
         finally:
-            try:
-                # SQLEntryValues.entries is a manually allocated object, so we
-                # need to free it.
-                for entry in entries.items:
-                    entry.entries.removeAll
-            finally:
-                GC_enable()
+            GC_enable()
 
     # At this point, all of the garbage we generated while processing the query can be collected.
     # So we run a full collection so that our allocated memory can be reused for the next query!
