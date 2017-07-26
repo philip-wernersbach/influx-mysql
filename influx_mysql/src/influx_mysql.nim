@@ -388,8 +388,13 @@ proc runDBQueryAndUnpack(sql: cstring, series: string, period: uint64,
 
                         fieldName = "mean"
 
-                    var fieldNameInterned = internedStrings.getOrDefault(fieldName)
-                    if fieldNameInterned == nil:
+                    var fieldNameInterned: ref string
+
+                    internedStrings.withValue(fieldName, value) do:
+                        # Called when internedStrings contains fieldName.
+                        fieldNameInterned = value[]
+                    do:
+                        # Called when internedStrings does not contain fieldName.
                         new(fieldNameInterned)
                         fieldNameInterned[] = fieldName
 
@@ -450,7 +455,12 @@ proc toJsonNode(kv: SeriesAndData, fill: bool, fillField: JSONField): JsonNode =
             var entryArray = newJArray()
 
             for column in kv.order.keys:
-                entryArray.add(entry.mgetOrPut(column, fillField))
+                entry[].withValue(column, value) do:
+                    # Called when column is in entry.
+                    entryArray.add(value[])
+                do:
+                    # Called when column is not in entry.
+                    entryArray.add(fillField)
 
             valuesArray.add(entryArray)
     else:
