@@ -72,13 +72,14 @@ proc append*[T](list: var AppendList[T], value: T) =
     if tail.capacity > tail.data[].len:
         tail.data[].add(value)
     else:
-        let oldLen = list.nodes.len
+        if list.capacity > list.nodes.len:
+            let oldLen = list.nodes.len
 
-        list.nodes.setLen(min(oldLen * NODES_GROWTH_FACTOR, oldLen + MAX_NODES_GROWTH_LEN))
-        list.nodes.setLen(oldLen + 1)
+            list.nodes.setLen(min(oldLen * NODES_GROWTH_FACTOR, oldLen + MAX_NODES_GROWTH_LEN))
+            list.nodes.setLen(oldLen)
 
         let newTail = initAppendListNode[T](min(tail.capacity * DATA_GROWTH_FACTOR, MAX_DATA_GROWTH_BYTES div sizeof(T)))
-        list.nodes[oldLen] = newTail
+        list.nodes.add(newTail)
 
         newTail.data[].add(value)
 
